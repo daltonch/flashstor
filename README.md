@@ -25,8 +25,11 @@ Custom Scripts for importing SD Cards and rsyncing, located in this repo
 
 # Building
 ![Hardware Gathered](images/20230810_192050.jpg)
+Hardware all Gathered up
 
 ![NVMe and Ram going in](images/20230810_210417.jpg)
+Installing the NVMe drives and Ram
 
 ![More NVMes](images/20230810_210527.jpg)
+The rest of the NVMes
 
