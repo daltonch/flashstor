@@ -24,4 +24,5 @@ Ubuntu Linux in LXC hosting Plex
 Custom Scripts for importing SD Cards and rsyncing, located in this repo
 
 # Building
-(https://github.com/daltonch/flashstor/blob/main/images/20230810_192050.jpg)
+![Hardware Gathered](images/20230810_192050.jpg)
+
