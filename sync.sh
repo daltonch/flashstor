@@ -18,6 +18,7 @@ declare -r -A disk=(
   ["dan/dd2"]="mnop-5678"
 )
 
+YELLOW='\033[0;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
@@ -41,7 +42,8 @@ do
       uuid=$(lsblk -n -o UUID $dev)
       if ! [[ "$knownd" == *"$uuid"* ]]; then
         printf "${RED}$uuid${NC} is a NEW device at ${RED}$dev${NC} "
-        read -p "Press ENTER to Ignore, CTRL+C to Stop so you can add to config. Mount with 'mount UUID=$uuid /mnt/sdcards/tmp'"
+        printf "Mount with '${YELLOW}mount UUID=$uuid /mnt/sdcards/tmp${NC}'\n"
+        read -p "Press ENTER to Ignore, CTRL+C to Stop so you can add to config."
       fi
   fi
 done
@@ -65,7 +67,9 @@ done
 # Do the rsync and copy all the files
 rsync -nthavmL --info=progress2 --no-i-r  --include="*/" --include="*.MP4" --include="*.JPG" --exclude="*" sdcards/* /mnt/FlashStor/Import/
 read -p "Press Enter to Start Copy if all looks good"
-time rsync -thavmL --info=progress2 --no-i-r  --include="*/" --include="*.MP4" --include="*.JPG" --exclude="*" sdcards/* /mnt/FlashStor/Import/
+time rsync -thavmLog --chown=Chad:users --info=progress2 --no-i-r  --include="*/" --include="*.MP4" --include="*.JPG" --exclude="*" sdcards/* /mnt/FlashStor/Import/
+
+# Fix permissions again, just in case...
 
 chown -R Chad:users /mnt/FlashStor/*
 chmod -R 755 /mnt/FlashStor/*
