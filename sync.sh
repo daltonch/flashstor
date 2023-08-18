@@ -65,9 +65,9 @@ for key in ${!disk[@]}; do
 done
 
 # Do the rsync and copy all the files
-rsync -nthavmL --info=progress2 --no-i-r  --include="*/" --include="*.MP4" --include="*.JPG" --exclude="*" sdcards/* /mnt/FlashStor/Import/
+rsync -nthavmL --exclude-from=exclude --include="*/" sdcards/* /mnt/FlashStor/Import/
 read -p "Press Enter to Start Copy if all looks good"
-time rsync -thavmLog --chown=Chad:users --info=progress2 --no-i-r  --include="*/" --include="*.MP4" --include="*.JPG" --exclude="*" sdcards/* /mnt/FlashStor/Import/
+time rsync -thavmLog --chown=Chad:users --info=progress2 --no-i-r --exclude-from=exclude --include="*/" sdcards/* /mnt/FlashStor/Import/
 
 # Fix permissions again, just in case...
 

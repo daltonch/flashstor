@@ -16,4 +16,5 @@ mdb*
 *.LRV
 .Spotlight-*
 .fseventsd/
+.DS_Store
 
