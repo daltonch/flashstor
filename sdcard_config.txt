@@ -1,0 +1,13 @@
+# SD Card Configuration File
+
+# Supported file formats (comma-separated, without dot, case-insensitive)
+# If not specified, defaults to: mp4,mov,wav,jpg
+FORMATS=mp4,wav,jpg
+
+# SD Card Labels (optional - if omitted, volume names will be used)
+# Format: UUID=owner/cardname
+# Lines starting with # are comments and will be ignored
+LABELS:
+#E957-B26D=Chad/Rear-Hero12
+#9696-0289=Chad/Front-Hero13
+#B139-BCC7=Chad/Helmet-Hero11mini
