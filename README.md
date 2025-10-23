@@ -38,9 +38,22 @@ The rest of the NVMes
 
 # Usage
 
-## sync.sh - GoPro Media Importer
+## sync.sh - SD Card Media Importer
 
-The `sync.sh` script is a cross-platform utility for importing and organizing GoPro media files (MP4/WAV) by creation date.
+The `sync.sh` script is a cross-platform utility for importing and organizing media files from SD cards by creation date. Originally designed for GoPro cameras, it now supports any file format.
+
+### Key Features
+
+- **Flexible file format support**: Configure any file types (mp4, mov, lrv, wav, jpg, png, etc.)
+- **Optional UUID-based naming**: Map SD cards to friendly names or use volume names
+- **Parallel processing**: Import from multiple SD cards simultaneously
+- **Automatic duplicate handling**: Uses rsync to skip existing files (no prompts needed)
+- **Date-based organization**: Files organized by creation date (YYYYMMDD format)
+- **Metadata extraction**: Uses exiftool or ffprobe for accurate creation dates
+- **Progress tracking**: Real-time progress display with per-card statistics
+- **Cross-platform**: Works on macOS and Linux
+- **Dry-run mode**: Preview operations before copying
+- **Auto-eject**: Optionally unmount SD cards after processing
 
 ### Prerequisites
 
@@ -56,7 +69,7 @@ bash --version
 **Optional Dependencies** (improve functionality):
 - `exiftool` - Preferred for extracting metadata from media files
 - `ffprobe` - Fallback for metadata extraction
-- `pv` - Shows progress bars during file copy
+- `rsync` - Used for file copying with progress display (usually pre-installed)
 
 ### Basic Usage
 
@@ -76,20 +89,34 @@ bash --version
 
 ### Configuration File (Optional)
 
-The script can use a UUID-based configuration file to map SD cards to friendly names. Config is **only used when explicitly specified** with the `--config` flag:
+The script can use an optional configuration file with two sections:
 
 **Format:**
 ```
-# SD Card UUID to Name Mapping
-UUID=owner/cardname
-```
+# File formats to process (comma-separated, without dot, case-insensitive)
+# If not specified, defaults to: mp4,mov,wav,jpg
+FORMATS=mp4,mov,lrv,wav,jpg
 
-**Example:**
-```
+# SD Card UUID to Name Mapping (optional - if omitted, volume names will be used)
+# Format: UUID=owner/cardname
+LABELS:
 E957-B26D=chad/Hero12
 0119-B4DD=chad/cd1
 04D5-EF09=chad/cd2
 ```
+
+**Configuration Sections:**
+
+1. **FORMATS** (optional): Comma-separated list of file extensions to process
+   - Default: `mp4,mov,wav,jpg`
+   - Case-insensitive
+   - No dots needed
+   - Example: `FORMATS=mp4,mov,lrv,wav,jpg,png`
+
+2. **LABELS** (optional): SD Card UUID to Name Mapping
+   - If omitted or empty, the script will use SD card volume names
+   - Format: `UUID=owner/cardname`
+   - Enables consistent folder naming across different mount points
 
 **Finding UUIDs:**
 ```bash
@@ -103,12 +130,15 @@ lsblk -n -o UUID /dev/sdX
 ```
 
 **Behavior:**
-- **With `--config` flag:** Files organized as `<target>/<YYYYMMDD>/<mapped_name>/files`
+- **With `--config` and LABELS defined:** Files organized as `<target>/<YYYYMMDD>/<mapped_name>/files`
   - Example: `~/Backup/20251008/chad/Hero12/GX011286.MP4`
-  - Config must be explicitly specified with `--config` flag
+  - Uses UUID-based mapping for consistent folder names
+- **With `--config` but no LABELS:** Files organized as `<target>/<YYYYMMDD>/<volume_name>/files`
+  - Example: `~/Backup/20251008/CDHero12/GX011286.MP4`
+  - Uses volume names when LABELS section is omitted or empty
 - **Without `--config` flag:** Files organized as `<target>/<YYYYMMDD>/<volume_name>/files`
   - Example: `~/Backup/20251008/CDHero12/GX011286.MP4`
-  - Uses volume names even if config file exists
+  - Uses volume names, processes default file formats
 
 ### Command Line Options
 
@@ -124,8 +154,9 @@ lsblk -n -o UUID /dev/sdX
 
 ### Output Structure
 
-Files are organized by date with SD card names as subfolders:
+Files are organized by date with SD card identifiers as subfolders.
 
+**With LABELS defined (UUID-based mapping):**
 ```
 ~/Backup/
 ├── 20251008/
@@ -143,17 +174,33 @@ Files are organized by date with SD card names as subfolders:
             └── GX041287.MP4
 ```
 
+**Without LABELS (volume name based):**
+```
+~/Backup/
+├── 20251008/
+│   ├── CDHero12/
+│   │   ├── GX011286.MP4
+│   │   ├── GX021286.MP4
+│   │   └── GX031286.WAV
+│   └── Hero11mini/
+│       └── GH010123.MP4
+└── 20251009/
+    └── CDHero13/
+        └── GX041287.MP4
+```
+
 ### Duplicate File Handling
 
-When a file with the same name exists in the destination, you'll be prompted:
-- **(s) Skip** - Keep existing file, don't copy
-- **(o) Overwrite** - Replace existing file with new one
-- **(r) Rename** - Copy with _1, _2, etc. suffix
-- **(a) Apply to all** - Use chosen action for all remaining duplicates
+The script uses `rsync` with `--ignore-existing` flag, which automatically skips files that already exist in the destination. This is ideal for:
+- Incremental backups (only new files are copied)
+- Parallel SD card processing (no interactive prompts needed)
+- Safe re-runs (won't overwrite existing files)
+
+Files are considered duplicates if they have the same name in the same destination folder. If you need to update existing files, remove them from the destination first.
 
 ### Unknown SD Cards
 
-If using a config file and an unknown SD card is detected, the script will:
+If using a config file **with LABELS defined** and an unknown SD card is detected, the script will:
 1. Exit immediately before processing any files
 2. Display the card's UUID
 3. Provide the exact line to add to your config file
@@ -168,19 +215,29 @@ Add this line to your config file (sdcard_config.txt):
   1234-ABCD=owner/cardname
 ```
 
+**Note:** If LABELS section is omitted or empty in the config, the script will use volume names and won't require UUID mappings.
+
 ### Examples
 
-**Basic import without config (uses volume names):**
+**Basic import without config (uses volume names, default formats):**
 ```bash
 ./sync.sh --source /Volumes/CDHero12 --target ~/Movies/Import
 ```
 
-**Import with config file (uses UUID mapping):**
+**Import with config for custom file formats only:**
 ```bash
+# Config file with just FORMATS (no LABELS section)
+# FORMATS=lrv,wav,jpg
 ./sync.sh --config sdcard_config.txt --source /Volumes/CDHero12 --target ~/Movies/Import
 ```
 
-**Multiple cards with config and auto-eject:**
+**Import with config file (uses UUID mapping and custom formats):**
+```bash
+# Config file with both FORMATS and LABELS sections
+./sync.sh --config sdcard_config.txt --source /Volumes/CDHero12 --target ~/Movies/Import
+```
+
+**Multiple cards with config and auto-eject (parallel processing):**
 ```bash
 ./sync.sh \
   --config sdcard_config.txt \

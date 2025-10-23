@@ -33,18 +33,36 @@ CONFIG_FILE=""
 DRY_RUN=false
 VERBOSE=false
 AUTO_EJECT=false
-DUPLICATE_ACTION=""
-APPLY_TO_ALL=false
 START_TIME=0
 
 # Associative array for UUID to name mapping
 declare -A UUID_MAP
 
-# Statistics
-FILES_COPIED=0
-FILES_SKIPPED=0
-FILES_RENAMED=0
-FILES_ERROR=0
+# Per-source statistics (associative arrays keyed by source path)
+declare -A SOURCE_FILES_COPIED
+declare -A SOURCE_BYTES_COPIED
+declare -A SOURCE_FILES_SKIPPED
+declare -A SOURCE_FILES_ERROR
+declare -A SOURCE_TIME_ELAPSED
+
+# Overall statistics
+TOTAL_FILES_COPIED=0
+TOTAL_BYTES_COPIED=0
+TOTAL_FILES_SKIPPED=0
+TOTAL_FILES_ERROR=0
+
+# Lists for tracking
+declare -a SKIPPED_FILES_LIST
+declare -a ERROR_FILES_LIST
+
+# File formats to process (configurable via config file)
+declare -a FILE_FORMATS
+# Default formats if not specified in config
+FILE_FORMATS=(mp4 mov wav jpg)
+
+# Duplicate file handling state
+DUPLICATE_ACTION=""
+APPLY_TO_ALL=false
 
 # Show help message
 show_help() {
@@ -52,7 +70,7 @@ show_help() {
 SDCard Media Importer v1.0
 
 DESCRIPTION:
-    Copies MP4 and WAV files from one or more SD cards and organizes them by date taken.
+    Copies files from one or more SD cards and organizes them by date taken.
 
     Folder structure:
     - With config: <target>/<YYYYMMDD>/<mapped_name>/files
@@ -95,14 +113,26 @@ OPTIONS:
     --help              Display this help message and exit
 
 CONFIG FILE FORMAT:
-    # SD Card UUID to Name Mapping
-    # Lines starting with # are comments
-    UUID=friendly/name
+    The config file has two optional sections:
 
-    Example:
-    0119-B4DD=chad/cd1
-    04D5-EF09=chad/cd2
-    abcd-1234=pete/pd1
+    1. FORMATS (optional) - Comma-separated list of file extensions to process
+       Default: mp4,mov,wav,jpg
+       Example: FORMATS=mp4,mov,lrv,wav,jpg
+
+    2. LABELS (optional) - SD Card UUID to Name Mapping
+       Format: UUID=owner/cardname
+       If not specified, SD card volume names will be used for organization
+       Lines starting with # are comments
+
+    Example config file:
+        # File formats to process (comma-separated, without dot)
+        FORMATS=mp4,mov,lrv,wav,jpg,png
+
+        # SD Card Labels (optional - omit to use volume names)
+        LABELS:
+        E957-B26D=chad/Hero12
+        9696-0289=chad/Front-Hero13
+        B139-BCC7=chad/Helmet-Hero11mini
 
     To find a UUID:
     - macOS: diskutil info /Volumes/CARDNAME | grep UUID
@@ -142,21 +172,23 @@ DEPENDENCIES:
     - macOS: diskutil (built-in)
     - Linux: lsblk or blkid (usually available)
 
-    Metadata extraction:
-    - exiftool (preferred)
-    - ffprobe (fallback)
+    File copying (required):
+    - rsync (usually available on all systems)
+
+    Metadata extraction and date fixing:
+    - exiftool (preferred) - Extracts video metadata and sets file modification times
+    - ffprobe (fallback) - Extracts video metadata only
     - file modification time (final fallback)
 
-    Progress display (optional):
-    - pv (pipe viewer) - Shows progress bar during file copy
-      Without pv, file size will be displayed instead
-
 DUPLICATE HANDLING:
-    When a file with the same name exists in the destination, you will be prompted:
-    - (s) Skip: Keep existing file, don't copy
-    - (o) Overwrite: Replace existing file with new one
-    - (r) Rename: Copy with _1, _2, etc. suffix
-    - (a) Apply choice to all remaining duplicates
+    Duplicate files (files with the same name) are automatically skipped.
+    The script uses rsync with --ignore-existing to skip files that already exist
+    in the destination. Skipped files are logged and shown in the summary.
+
+PARALLEL PROCESSING:
+    When multiple SD cards are specified with --source, they will be processed
+    in parallel for faster imports. Each SD card is processed independently and
+    statistics are tracked per-source and overall.
 
 EXIT CODES:
     0  - Success
@@ -223,11 +255,6 @@ display_metadata_method() {
             warning "Metadata extraction: file modification times (exiftool/ffprobe not found)"
             ;;
     esac
-
-    # Check for pv availability
-    if ! command -v pv &> /dev/null; then
-        warning "Progress display: pv not found - install for progress bars during copy"
-    fi
 }
 
 # Load UUID mapping from config file
@@ -246,13 +273,42 @@ load_config() {
 
     verbose "Loading config from: $config_file"
 
+    local in_labels_section=false
+    local found_labels_header=false
+
     # Read config file line by line
     while IFS= read -r line || [ -n "$line" ]; do
         # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-        # Parse UUID=name format
+        # Check for FORMATS= line
+        if [[ "$line" =~ ^FORMATS=(.+)$ ]]; then
+            local formats_value="${BASH_REMATCH[1]}"
+            # Parse comma-separated formats
+            IFS=',' read -ra FILE_FORMATS <<< "$formats_value"
+            # Trim whitespace from each format
+            for i in "${!FILE_FORMATS[@]}"; do
+                FILE_FORMATS[$i]=$(echo "${FILE_FORMATS[$i]}" | tr -d ' ')
+            done
+            verbose "Loaded formats: ${FILE_FORMATS[*]}"
+            continue
+        fi
+
+        # Check for LABELS: section header
+        if [[ "$line" =~ ^LABELS:$ ]]; then
+            found_labels_header=true
+            in_labels_section=true
+            verbose "Found LABELS section"
+            continue
+        fi
+
+        # Parse UUID=name format (only if in LABELS section or if we haven't found header yet for backward compat check)
         if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+            if [ "$found_labels_header" = false ]; then
+                error "Config file must have 'LABELS:' section header before UUID mappings"
+                error "Add 'LABELS:' line before your UUID entries"
+                exit 4
+            fi
             local uuid="${BASH_REMATCH[1]}"
             local name="${BASH_REMATCH[2]}"
             UUID_MAP["$uuid"]="$name"
@@ -260,12 +316,29 @@ load_config() {
         fi
     done < "$config_file"
 
-    if [ ${#UUID_MAP[@]} -eq 0 ]; then
-        error "No valid UUID mappings found in config file"
-        exit 4
+    # LABELS section is now optional - if not found or empty, will use volume names
+    # Check if UUID_MAP has any entries (safe with set -u)
+    local uuid_count=0
+    if [ -n "${UUID_MAP[*]+x}" ]; then
+        uuid_count=${#UUID_MAP[@]}
     fi
 
-    info "Loaded ${#UUID_MAP[@]} SD card mapping(s)"
+    if [ "$found_labels_header" = true ] && [ "$uuid_count" -eq 0 ]; then
+        warning "LABELS section found but no UUID mappings defined - will use volume names"
+    elif [ "$found_labels_header" = false ]; then
+        info "No LABELS section in config - will use volume names"
+    fi
+
+    # Show what formats we're using
+    if [ ${#FILE_FORMATS[@]} -eq 0 ]; then
+        # Should not happen due to defaults, but just in case
+        FILE_FORMATS=(mp4 mov wav jpg)
+    fi
+    info "File formats: ${FILE_FORMATS[*]}"
+
+    if [ "$uuid_count" -gt 0 ]; then
+        info "Loaded $uuid_count SD card mapping(s)"
+    fi
 }
 
 # Extract short UUID from full UUID (for FAT32 compatibility)
@@ -327,6 +400,18 @@ get_volume_uuid() {
 
 # Validate all source paths have UUIDs in config
 validate_source_uuids() {
+    # If no UUID mappings defined, skip validation and use volume names
+    local uuid_count=0
+    if [ -n "${UUID_MAP[*]+x}" ]; then
+        uuid_count=${#UUID_MAP[@]}
+    fi
+
+    if [ "$uuid_count" -eq 0 ]; then
+        info "No UUID mappings defined - will use volume names for organization"
+        echo ""
+        return 0
+    fi
+
     info "Validating SD card UUIDs..."
     echo ""
 
@@ -349,8 +434,10 @@ validate_source_uuids() {
         fi
 
         # Try to match with short UUID first, then full UUID
-        local mapped_name="${UUID_MAP[$short_uuid]}"
-        if [ -z "$mapped_name" ]; then
+        local mapped_name=""
+        if [[ -v "UUID_MAP[$short_uuid]" ]]; then
+            mapped_name="${UUID_MAP[$short_uuid]}"
+        elif [[ -v "UUID_MAP[$uuid]" ]]; then
             mapped_name="${UUID_MAP[$uuid]}"
         fi
 
@@ -370,7 +457,7 @@ validate_source_uuids() {
         fi
 
         # Display which UUID was used for matching
-        if [ -n "${UUID_MAP[$short_uuid]}" ]; then
+        if [[ -v "UUID_MAP[$short_uuid]" ]]; then
             success "Found mapping: $short_uuid -> $mapped_name"
         else
             success "Found mapping: $uuid -> $mapped_name"
@@ -414,7 +501,7 @@ get_sdcard_name() {
         return 0
     fi
 
-    # Config file is loaded - use UUID mapping
+    # Config file is loaded - use UUID mapping if available
     local uuid
     uuid=$(get_volume_uuid "$source_path")
 
@@ -427,14 +514,53 @@ get_sdcard_name() {
     short_uuid=$(get_short_uuid "$uuid")
 
     # Try to match with short UUID first, then full UUID
-    local mapped_name="${UUID_MAP[$short_uuid]}"
-    if [ -z "$mapped_name" ]; then
+    local mapped_name=""
+    if [[ -v "UUID_MAP[$short_uuid]" ]]; then
+        mapped_name="${UUID_MAP[$short_uuid]}"
+    elif [[ -v "UUID_MAP[$uuid]" ]]; then
         mapped_name="${UUID_MAP[$uuid]}"
     fi
 
+    # If no mapping found and UUID_MAP is empty, fall back to volume name
     if [ -z "$mapped_name" ]; then
-        error "No mapping found for UUID: $uuid (short: $short_uuid)"
-        exit 4
+        local uuid_count=0
+        if [ -n "${UUID_MAP[*]+x}" ]; then
+            uuid_count=${#UUID_MAP[@]}
+        fi
+
+        if [ "$uuid_count" -eq 0 ]; then
+            # No UUID mappings configured - use volume name
+            local sdcard_name=""
+
+            # Try to get volume name on macOS
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                sdcard_name=$(basename "$source_path")
+            else
+                # On Linux, try to get the volume label
+                if command -v lsblk &> /dev/null; then
+                    local device
+                    device=$(df "$source_path" | tail -1 | awk '{print $1}')
+                    sdcard_name=$(lsblk -no LABEL "$device" 2>/dev/null || basename "$source_path")
+                else
+                    sdcard_name=$(basename "$source_path")
+                fi
+            fi
+
+            # Fallback to basename if empty
+            if [ -z "$sdcard_name" ]; then
+                sdcard_name=$(basename "$source_path")
+            fi
+
+            # Sanitize name (remove special characters)
+            sdcard_name=$(echo "$sdcard_name" | tr -cd '[:alnum:]_-')
+
+            echo "$sdcard_name"
+            return 0
+        else
+            # UUID mappings exist but this UUID is not found
+            error "No mapping found for UUID: $uuid (short: $short_uuid)"
+            exit 4
+        fi
     fi
 
     echo "$mapped_name"
@@ -482,95 +608,24 @@ extract_date() {
 # Find all media files
 find_media_files() {
     local source="$1"
-    find "$source" -type f \( -iname "*.mp4" -o -iname "*.wav" \) 2>/dev/null
-}
 
-# Handle duplicate files - sets DUPLICATE_ACTION global variable
-handle_duplicate() {
-    local source_file="$1"
-    local target_file="$2"
+    # Build find command dynamically based on FILE_FORMATS array
+    local find_cmd="find \"$source\" -type f \\("
+    local first=true
 
-    # If we already have a decision for all files, use it
-    if [ "$APPLY_TO_ALL" = true ] && [ -n "$DUPLICATE_ACTION" ]; then
-        return 0
-    fi
-
-    echo ""
-    warning "File already exists: $(basename "$target_file")"
-    echo "Source: $source_file"
-    echo "Target: $target_file"
-    echo ""
-    echo "Choose action:"
-    echo "  (s) Skip - keep existing file"
-    echo "  (o) Overwrite - replace with new file"
-    echo "  (r) Rename - add suffix (_1, _2, etc.)"
-    echo "  (a) Apply choice to all remaining duplicates"
-    echo ""
-
-    while true; do
-        read -p "Action [(s)kip/(o)verwrite/(r)ename/(a)ll]: " -n 1 -r choice
-        echo ""
-
-        case "$choice" in
-            s|S)
-                DUPLICATE_ACTION="skip"
-                return 0
-                ;;
-            o|O)
-                DUPLICATE_ACTION="overwrite"
-                return 0
-                ;;
-            r|R)
-                DUPLICATE_ACTION="rename"
-                return 0
-                ;;
-            a|A)
-                while true; do
-                    read -p "Apply which action to all? [(s)kip/(o)verwrite/(r)ename]: " -n 1 -r all_choice
-                    echo ""
-                    case "$all_choice" in
-                        s|S)
-                            APPLY_TO_ALL=true
-                            DUPLICATE_ACTION="skip"
-                            return 0
-                            ;;
-                        o|O)
-                            APPLY_TO_ALL=true
-                            DUPLICATE_ACTION="overwrite"
-                            return 0
-                            ;;
-                        r|R)
-                            APPLY_TO_ALL=true
-                            DUPLICATE_ACTION="rename"
-                            return 0
-                            ;;
-                        *)
-                            echo "Invalid choice. Please enter s, o, or r."
-                            ;;
-                    esac
-                done
-                ;;
-            *)
-                echo "Invalid choice. Please enter s, o, r, or a."
-                ;;
-        esac
-    done
-}
-
-# Get unique filename by adding suffix
-get_unique_filename() {
-    local target_file="$1"
-    local dir=$(dirname "$target_file")
-    local filename=$(basename "$target_file")
-    local name="${filename%.*}"
-    local ext="${filename##*.}"
-    local counter=1
-
-    while [ -e "${dir}/${name}_${counter}.${ext}" ]; do
-        ((counter++))
+    for format in "${FILE_FORMATS[@]}"; do
+        if [ "$first" = true ]; then
+            find_cmd+=" -iname \"*.${format}\""
+            first=false
+        else
+            find_cmd+=" -o -iname \"*.${format}\""
+        fi
     done
 
-    echo "${dir}/${name}_${counter}.${ext}"
+    find_cmd+=" \\) 2>/dev/null"
+
+    # Execute the dynamically built command
+    eval "$find_cmd"
 }
 
 # Get human-readable file size
@@ -602,13 +657,15 @@ get_file_size() {
     fi
 }
 
-# Copy file with timestamp preservation
-copy_file() {
+# Copy file using rsync with progress
+rsync_file() {
     local source_file="$1"
     local target_dir="$2"
+    local source_path="$3"  # For tracking stats
     local filename
     local target_file
     local file_size
+    local bytes_copied=0
 
     filename=$(basename "$source_file")
     target_file="${target_dir}/${filename}"
@@ -618,74 +675,111 @@ copy_file() {
         mkdir -p "$target_dir"
     fi
 
-    # Check if file already exists
-    if [ -e "$target_file" ]; then
-        if [ "$DRY_RUN" = false ]; then
-            # Reset DUPLICATE_ACTION for this file if not applying to all
-            if [ "$APPLY_TO_ALL" = false ]; then
-                DUPLICATE_ACTION=""
-            fi
+    # Get file size for statistics
+    file_size=$(get_file_size "$source_file")
 
-            handle_duplicate "$source_file" "$target_file"
-
-            case "$DUPLICATE_ACTION" in
-                skip)
-                    info "Skipped: $filename"
-                    ((FILES_SKIPPED++))
-                    return 0
-                    ;;
-                overwrite)
-                    verbose "Overwriting: $target_file"
-                    ;;
-                rename)
-                    target_file=$(get_unique_filename "$target_file")
-                    filename=$(basename "$target_file")
-                    info "Renaming to: $filename"
-                    ((FILES_RENAMED++))
-                    ;;
-            esac
-        else
-            warning "[DRY RUN] File exists: $filename"
-        fi
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        bytes_copied=$(stat -f "%z" "$source_file" 2>/dev/null)
+    else
+        bytes_copied=$(stat -c "%s" "$source_file" 2>/dev/null)
     fi
 
     # Copy the file
     if [ "$DRY_RUN" = true ]; then
-        echo " [DRY RUN] Would copy"
-    else
-        file_size=$(get_file_size "$source_file")
-
-        # Check if pv is available for progress bar
-        if command -v pv &> /dev/null; then
-            # Use pv for progress bar
-            echo ""  # New line before progress bar
-            if pv -pterb "$source_file" > "$target_file"; then
-                # Preserve timestamps after copy
-                touch -r "$source_file" "$target_file" 2>/dev/null
-                verbose "Copied: $filename -> $target_dir"
-                ((FILES_COPIED++))
-            else
-                error "Failed to copy: $filename"
-                ((FILES_ERROR++))
-                return 1
-            fi
-        else
-            # Fallback to cp with size indicator (no pv)
-            echo -n "... ($file_size) "
-            if cp -p "$source_file" "$target_file" 2>/dev/null; then
-                echo "done"
-                verbose "Copied: $filename -> $target_dir"
-                ((FILES_COPIED++))
-            else
-                echo "failed"
-                error "Failed to copy: $filename"
-                ((FILES_ERROR++))
-                return 1
-            fi
-        fi
+        echo " [DRY RUN] Would rsync"
+        return 0
     fi
 
-    return 0
+    # Use rsync with progress
+    # --archive: preserve permissions, times, etc.
+    # --progress: show progress bar
+    # --info=progress2: show overall progress percentage
+    # --ignore-existing: skip files that exist in destination (natural duplicate handling)
+
+    # Check if file already exists (for skipped detection)
+    if [ -f "$target_file" ]; then
+        verbose "Skipped (exists): $filename"
+        SOURCE_FILES_SKIPPED["$source_path"]=$((${SOURCE_FILES_SKIPPED["$source_path"]:-0} + 1))
+        SKIPPED_FILES_LIST+=("$filename")
+        return 2  # Return 2 to indicate skipped
+    fi
+
+    # File doesn't exist, copy it
+    # Show progress bar only if verbose mode is enabled
+    local rsync_opts="--archive"
+    if [ "$VERBOSE" = true ]; then
+        rsync_opts="$rsync_opts --progress --human-readable"
+    fi
+
+    if rsync $rsync_opts "$source_file" "$target_dir/" >/dev/null; then
+        verbose "Copied: $filename -> $target_dir"
+        SOURCE_FILES_COPIED["$source_path"]=$((${SOURCE_FILES_COPIED["$source_path"]:-0} + 1))
+        SOURCE_BYTES_COPIED["$source_path"]=$((${SOURCE_BYTES_COPIED["$source_path"]:-0} + bytes_copied))
+        return 0
+    else
+        error "Failed to copy: $filename"
+        SOURCE_FILES_ERROR["$source_path"]=$((${SOURCE_FILES_ERROR["$source_path"]:-0} + 1))
+        ERROR_FILES_LIST+=("$filename")
+        return 1
+    fi
+}
+
+# Fix file dates using exiftool to match video capture date
+fix_file_dates() {
+    local target_dir="$1"
+    local tool="$2"
+
+    if [ "$tool" != "exiftool" ]; then
+        verbose "Skipping date fix - exiftool not available"
+        return 0
+    fi
+
+    verbose "Fixing file dates to match video capture dates..."
+
+    # Find all media files in target directory using configured formats
+    local files_to_fix
+    local find_cmd="find \"$target_dir\" -type f \\("
+    local first=true
+
+    for format in "${FILE_FORMATS[@]}"; do
+        if [ "$first" = true ]; then
+            find_cmd+=" -iname \"*.${format}\""
+            first=false
+        else
+            find_cmd+=" -o -iname \"*.${format}\""
+        fi
+    done
+
+    find_cmd+=" \\) 2>/dev/null"
+    files_to_fix=$(eval "$find_cmd")
+
+    if [ -z "$files_to_fix" ]; then
+        return 0
+    fi
+
+    local fixed_count=0
+    while IFS= read -r file; do
+        if [ -f "$file" ]; then
+            # Extract creation date from video metadata
+            # Temporarily disable errexit for exiftool operations
+            set +e
+            local create_date
+            create_date=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d%H%M.%S" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}' | tr -d ':' | sed 's/^\([0-9]\{8\}\) \([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1\2\3.\4/')
+            set -e
+
+            if [ -n "$create_date" ] && [[ "$create_date" =~ ^[0-9]{12}\.[0-9]{2}$ ]]; then
+                # Set file modification time to match video capture date
+                if touch -t "$create_date" "$file" 2>/dev/null; then
+                    fixed_count=$((fixed_count + 1))
+                    verbose "  Fixed date for: $(basename "$file")"
+                fi
+            fi
+        fi
+    done <<< "$files_to_fix"
+
+    if [ $fixed_count -gt 0 ]; then
+        info "Fixed dates for $fixed_count file(s)"
+    fi
 }
 
 # Process files from a single source
@@ -694,9 +788,15 @@ process_single_source() {
     local tool="$2"
     local sdcard_name=$(get_sdcard_name "$source_path")
 
-    info "Processing SD Card: $sdcard_name ($source_path)"
+    # Initialize per-source statistics
+    SOURCE_FILES_COPIED["$source_path"]=0
+    SOURCE_BYTES_COPIED["$source_path"]=0
+    SOURCE_FILES_SKIPPED["$source_path"]=0
+    SOURCE_FILES_ERROR["$source_path"]=0
 
-    echo ""
+    # Track start time
+    local start_time=$(date +%s)
+
     verbose "Scanning for media files in $source_path..."
 
     # Use mapfile/readarray if available (bash 4+), otherwise use while loop with temp array
@@ -712,11 +812,15 @@ process_single_source() {
     local total_files=${#files[@]}
 
     if [ "$total_files" -eq 0 ]; then
-        warning "No MP4 or WAV files found in $source_path"
+        warning "$sdcard_name: No media files found"
+        # Track end time even if no files
+        local end_time=$(date +%s)
+        SOURCE_TIME_ELAPSED["$source_path"]=$((end_time - start_time))
         return 0
     fi
 
-    info "Found $total_files media file(s)"
+    # Combine SD card name and file count on one line
+    info "$sdcard_name: Found $total_files media file(s)"
     echo ""
 
     local current=0
@@ -734,16 +838,41 @@ process_single_source() {
 
         echo -n "[$current/$total_files] Processing: $(basename "$file")"
 
-        if copy_file "$file" "$target_dir"; then
-            # copy_file handles the "done" output
-            :
-        else
-            # copy_file handles the "failed" output
-            :
-        fi
+        # Use rsync_file instead of copy_file
+        # Disable errexit temporarily to capture return code
+        local result
+        set +e
+        rsync_file "$file" "$target_dir" "$source_path"
+        result=$?
+        set -e
+
+        case $result in
+            0)
+                # File copied successfully
+                echo " - copied"
+                ;;
+            2)
+                # File skipped (already exists)
+                echo " - skipped (exists)"
+                ;;
+            1)
+                # Error occurred
+                echo " - failed"
+                ERROR_FILES_LIST+=("$(basename "$file")")
+                ;;
+        esac
     done
 
     echo ""
+
+    # Fix file dates using exiftool after all files are copied
+    if [ "$DRY_RUN" = false ] && [ "$tool" = "exiftool" ]; then
+        fix_file_dates "${TARGET_PATH}" "$tool"
+    fi
+
+    # Track end time
+    local end_time=$(date +%s)
+    SOURCE_TIME_ELAPSED["$source_path"]=$((end_time - start_time))
 
     # Unmount the SD card after processing if --eject flag is set
     if [ "$DRY_RUN" = false ] && [ "$AUTO_EJECT" = true ]; then
@@ -770,6 +899,90 @@ process_single_source() {
     return 0
 }
 
+# Process multiple sources in parallel
+process_sources_parallel() {
+    local tool="$1"
+    shift
+    local sources=("$@")
+
+    # Create temporary directory for inter-process communication
+    local temp_dir=$(mktemp -d)
+
+    # Array to store background job PIDs and their corresponding source paths
+    local -a pids=()
+    declare -A pid_to_source
+
+    # Launch each source processing in background
+    for source_path in "${sources[@]}"; do
+        (
+            # Each background process runs process_single_source
+            process_single_source "$source_path" "$tool"
+            exit_code=$?
+
+            # Write statistics to temp file for parent to read
+            local stat_file="${temp_dir}/$(basename "$source_path").stats"
+            cat > "$stat_file" << EOF
+FILES_COPIED=${SOURCE_FILES_COPIED["$source_path"]:-0}
+BYTES_COPIED=${SOURCE_BYTES_COPIED["$source_path"]:-0}
+FILES_SKIPPED=${SOURCE_FILES_SKIPPED["$source_path"]:-0}
+FILES_ERROR=${SOURCE_FILES_ERROR["$source_path"]:-0}
+TIME_ELAPSED=${SOURCE_TIME_ELAPSED["$source_path"]:-0}
+EOF
+
+            # Report completion
+            sdcard_name=$(get_sdcard_name "$source_path")
+            if [ $exit_code -eq 0 ]; then
+                echo ""
+                echo -e "${GREEN}✓ Completed: $sdcard_name${NC}"
+            else
+                echo ""
+                echo -e "${RED}✗ Failed: $sdcard_name${NC}"
+            fi
+
+            exit $exit_code
+        ) &
+        local pid=$!
+        pids+=($pid)
+        pid_to_source[$pid]="$source_path"
+    done
+
+    # Wait for all background jobs to complete
+    local overall_status=0
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then
+            overall_status=1
+        fi
+    done
+
+    # Read statistics from temp files and aggregate
+    for source_path in "${sources[@]}"; do
+        local stat_file="${temp_dir}/$(basename "$source_path").stats"
+        if [ -f "$stat_file" ]; then
+            # Source the stats file to get variables
+            local FILES_COPIED=0 BYTES_COPIED=0 FILES_SKIPPED=0 FILES_ERROR=0 TIME_ELAPSED=0
+            source "$stat_file"
+
+            # Store in parent's associative arrays
+            SOURCE_FILES_COPIED["$source_path"]=$FILES_COPIED
+            SOURCE_BYTES_COPIED["$source_path"]=$BYTES_COPIED
+            SOURCE_FILES_SKIPPED["$source_path"]=$FILES_SKIPPED
+            SOURCE_FILES_ERROR["$source_path"]=$FILES_ERROR
+            SOURCE_TIME_ELAPSED["$source_path"]=$TIME_ELAPSED
+
+            # Aggregate to overall statistics
+            TOTAL_FILES_COPIED=$((TOTAL_FILES_COPIED + FILES_COPIED))
+            TOTAL_BYTES_COPIED=$((TOTAL_BYTES_COPIED + BYTES_COPIED))
+            TOTAL_FILES_SKIPPED=$((TOTAL_FILES_SKIPPED + FILES_SKIPPED))
+            TOTAL_FILES_ERROR=$((TOTAL_FILES_ERROR + FILES_ERROR))
+        fi
+    done
+
+    # Clean up temp directory
+    rm -rf "$temp_dir"
+
+    return $overall_status
+}
+
 # Main processing function
 process_files() {
     local tool=$(check_dependencies)
@@ -785,10 +998,22 @@ process_files() {
 
     echo ""
 
-    # Process each source path sequentially
-    for source_path in "${SOURCE_PATHS[@]}"; do
+    # Process sources in parallel if multiple sources, otherwise sequential
+    if [ ${#SOURCE_PATHS[@]} -gt 1 ]; then
+        info "Processing ${#SOURCE_PATHS[@]} SD cards in parallel..."
+        echo ""
+        process_sources_parallel "$tool" "${SOURCE_PATHS[@]}"
+    else
+        # Single source - process directly
+        local source_path="${SOURCE_PATHS[0]}"
         process_single_source "$source_path" "$tool"
-    done
+
+        # Aggregate statistics for single source
+        TOTAL_FILES_COPIED=${SOURCE_FILES_COPIED["$source_path"]:-0}
+        TOTAL_BYTES_COPIED=${SOURCE_BYTES_COPIED["$source_path"]:-0}
+        TOTAL_FILES_SKIPPED=${SOURCE_FILES_SKIPPED["$source_path"]:-0}
+        TOTAL_FILES_ERROR=${SOURCE_FILES_ERROR["$source_path"]:-0}
+    fi
 
     return 0
 }
@@ -809,6 +1034,21 @@ format_time() {
     fi
 }
 
+# Format bytes to human-readable format
+format_bytes() {
+    local bytes=$1
+    local -a units=("B" "KB" "MB" "GB" "TB")
+    local unit=0
+    local size=$bytes
+
+    while [ $size -ge 1024 ] && [ $unit -lt 4 ]; do
+        size=$((size / 1024))
+        unit=$((unit + 1))
+    done
+
+    printf "%d %s" $size "${units[$unit]}"
+}
+
 # Print summary
 print_summary() {
     local end_time=$(date +%s)
@@ -816,28 +1056,90 @@ print_summary() {
     local formatted_time=$(format_time $elapsed)
 
     echo ""
-    echo "================================"
+    echo "========================================"
     echo "Summary"
-    echo "================================"
+    echo "========================================"
+    echo ""
 
     if [ "$DRY_RUN" = true ]; then
         success "Dry run completed"
-    else
-        success "Files copied: $FILES_COPIED"
-        if [ "$FILES_RENAMED" -gt 0 ]; then
-            info "Files renamed: $FILES_RENAMED"
-        fi
-        if [ "$FILES_SKIPPED" -gt 0 ]; then
-            warning "Files skipped: $FILES_SKIPPED"
-        fi
-        if [ "$FILES_ERROR" -gt 0 ]; then
-            error "Files with errors: $FILES_ERROR"
-        fi
+        info "Total time: $formatted_time"
+        echo "========================================"
+        return
     fi
 
-    info "Total time: $formatted_time"
+    # Per-source statistics (always show, even for single source)
+    if [ ${#SOURCE_PATHS[@]} -gt 1 ]; then
+        echo "Per-Source Statistics:"
+    else
+        echo "SD Card Statistics:"
+    fi
+    echo "----------------------------------------"
+    for source_path in "${SOURCE_PATHS[@]}"; do
+        local sdcard_name=$(get_sdcard_name "$source_path")
+        local files_copied=${SOURCE_FILES_COPIED["$source_path"]:-0}
+        local bytes_copied=${SOURCE_BYTES_COPIED["$source_path"]:-0}
+        local files_skipped=${SOURCE_FILES_SKIPPED["$source_path"]:-0}
+        local files_error=${SOURCE_FILES_ERROR["$source_path"]:-0}
+        local time_elapsed=${SOURCE_TIME_ELAPSED["$source_path"]:-0}
+        local formatted_bytes=$(format_bytes $bytes_copied)
+        local formatted_time_src=$(format_time $time_elapsed)
 
-    echo "================================"
+        echo ""
+        info "SD Card: $sdcard_name"
+        echo "  Files copied:   $files_copied"
+        echo "  Size copied:    $formatted_bytes"
+        if [ $files_skipped -gt 0 ]; then
+            echo "  Files skipped:  $files_skipped"
+        fi
+        if [ $files_error -gt 0 ]; then
+            echo "  Files error:    $files_error"
+        fi
+        echo "  Time taken:     $formatted_time_src"
+    done
+    echo ""
+    echo "----------------------------------------"
+
+    # Overall statistics
+    echo ""
+    echo "Overall Statistics:"
+    echo "----------------------------------------"
+    success "Total files copied:   $TOTAL_FILES_COPIED"
+    local formatted_total_bytes=$(format_bytes $TOTAL_BYTES_COPIED)
+    success "Total size copied:    $formatted_total_bytes"
+
+    if [ $TOTAL_FILES_SKIPPED -gt 0 ]; then
+        warning "Total files skipped:  $TOTAL_FILES_SKIPPED"
+    fi
+
+    if [ $TOTAL_FILES_ERROR -gt 0 ]; then
+        error "Total files error:    $TOTAL_FILES_ERROR"
+    fi
+
+    info "Total time:           $formatted_time"
+    echo ""
+
+    # Show list of skipped files if any (use set +u to avoid unbound variable errors)
+    set +u
+    if [ ${#SKIPPED_FILES_LIST[@]} -gt 0 ]; then
+        echo "Skipped files (already exist):"
+        for file in "${SKIPPED_FILES_LIST[@]}"; do
+            echo "  - $file"
+        done
+        echo ""
+    fi
+
+    # Show list of error files if any (use set +u to avoid unbound variable errors)
+    if [ ${#ERROR_FILES_LIST[@]} -gt 0 ]; then
+        echo "Files with errors:"
+        for file in "${ERROR_FILES_LIST[@]}"; do
+            echo "  - $file"
+        done
+        echo ""
+    fi
+    set -u
+
+    echo "========================================"
 }
 
 # Validate arguments
@@ -952,7 +1254,7 @@ main() {
     process_files
     print_summary
 
-    if [ "$FILES_ERROR" -gt 0 ]; then
+    if [ "$TOTAL_FILES_ERROR" -gt 0 ]; then
         exit 1
     fi
 
