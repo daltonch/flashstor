@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(./goproimporter.sh:*)",
+      "Bash(bash:*)",
+      "Bash(brew list:*)",
+      "Read(//usr/local/bin/**)",
+      "Bash(./sync.sh:*)",
+      "Read(//Users/chad.dalton/Movies/TestImport/20251018/**)",
+      "Read(//Users/chad.dalton/Movies/TestImport/**)",
+      "Bash(git checkout:*)",
+      "Bash(git merge:*)",
+      "Bash(git branch:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
