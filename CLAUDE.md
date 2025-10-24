@@ -35,12 +35,25 @@ Date folders at TOP level enable browsing by date across multiple SD cards. Impl
 
 This ensures the script works without external dependencies. Logic in `extract_date()` function (lines 443-480).
 
+**Config File Sections (Optional):**
+The config file supports three optional sections:
+
+1. **FORMATS:** Comma-separated file extensions to process (default: mp4,mov,wav,jpg)
+2. **IGNORE_FOLDERS:** Comma-separated folder names to skip during scan (default: .Trashes)
+3. **LABELS:** UUID to friendly name mappings for SD cards
+
 **UUID Mapping (Optional):**
 - Config file format: `UUID=friendly/name` (one per line)
 - Default config: `sdcard_config.txt` (if present in current directory)
 - Cross-platform UUID detection: macOS uses `diskutil`, Linux uses `lsblk`/`blkid`
 - Short UUID extraction for FAT32 compatibility (e.g., `E957-B26D`)
 - Unknown card detection: Exits immediately with helpful error message showing UUID
+
+**Folder Exclusion:**
+- Configurable via `IGNORE_FOLDERS` in config file
+- Default: `.Trashes` (macOS system folder)
+- Common additions: `.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`
+- Applied to both file discovery and date fixing operations
 
 **Duplicate File Handling:**
 - Interactive prompt on first duplicate (skip/overwrite/rename/apply-to-all)
@@ -132,10 +145,20 @@ Also update:
 - This CLAUDE.md file
 
 ### Add File Types
-Modify `find_media_files()` function (line 483):
-```bash
-find "$source" -type f \( -iname "*.mp4" -o -iname "*.wav" -o -iname "*.newtype" \) 2>/dev/null
+Edit `sdcard_config.txt` and modify the FORMATS line:
 ```
+FORMATS=mp4,mov,wav,jpg,newtype
+```
+
+The script dynamically builds the find command based on this configuration. No code changes needed.
+
+### Add/Modify Ignored Folders
+Edit `sdcard_config.txt` and modify the IGNORE_FOLDERS line:
+```
+IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd,.TemporaryItems,DCIM/MISC
+```
+
+The script dynamically builds folder exclusion patterns. Both `find_media_files()` and `fix_file_dates()` use this configuration. No code changes needed.
 
 ### Add Metadata Tools
 1. Add detection in `check_dependencies()` (line 198)

@@ -38,6 +38,18 @@ The rest of the NVMes
 
 # Usage
 
+## Setup ProxMox
+I like to automount the SDCards, on ProxMox you need to edit the following file,
+```bash
+nano /etc/udev/rules.d/99-sdcard-automount.rules
+```
+Then add this entry
+```bash
+# Generic rule for any SD card
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_LABEL}=="?*", RUN+="/usr/bin/systemd-mount --no-block --automount=yes --collect $devnode /media/$env{ID_FS_LABEL}"
+```
+This will auto mount any SDCard to /media/LABEL
+
 ## sync.sh - SD Card Media Importer
 
 The `sync.sh` script is a cross-platform utility for importing and organizing media files from SD cards by creation date. Originally designed for GoPro cameras, it now supports any file format.
@@ -45,6 +57,7 @@ The `sync.sh` script is a cross-platform utility for importing and organizing me
 ### Key Features
 
 - **Flexible file format support**: Configure any file types (mp4, mov, lrv, wav, jpg, png, etc.)
+- **Configurable folder exclusion**: Skip system folders like .Trashes, .Spotlight-V100, etc.
 - **Optional UUID-based naming**: Map SD cards to friendly names or use volume names
 - **Parallel processing**: Import from multiple SD cards simultaneously
 - **Automatic duplicate handling**: Uses rsync to skip existing files (no prompts needed)
@@ -89,13 +102,17 @@ bash --version
 
 ### Configuration File (Optional)
 
-The script can use an optional configuration file with two sections:
+The script can use an optional configuration file with three sections:
 
 **Format:**
 ```
 # File formats to process (comma-separated, without dot, case-insensitive)
 # If not specified, defaults to: mp4,mov,wav,jpg
 FORMATS=mp4,mov,lrv,wav,jpg
+
+# Folders to ignore during scan (comma-separated)
+# If not specified, defaults to: .Trashes
+IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd
 
 # SD Card UUID to Name Mapping (optional - if omitted, volume names will be used)
 # Format: UUID=owner/cardname
@@ -113,7 +130,13 @@ E957-B26D=chad/Hero12
    - No dots needed
    - Example: `FORMATS=mp4,mov,lrv,wav,jpg,png`
 
-2. **LABELS** (optional): SD Card UUID to Name Mapping
+2. **IGNORE_FOLDERS** (optional): Comma-separated list of folder names to skip during scan
+   - Default: `.Trashes`
+   - Common macOS system folders: `.Trashes`, `.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`
+   - Can include subdirectory paths like `DCIM/MISC`
+   - Example: `IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd`
+
+3. **LABELS** (optional): SD Card UUID to Name Mapping
    - If omitted or empty, the script will use SD card volume names
    - Format: `UUID=owner/cardname`
    - Enables consistent folder naming across different mount points

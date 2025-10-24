@@ -60,6 +60,11 @@ declare -a FILE_FORMATS
 # Default formats if not specified in config
 FILE_FORMATS=(mp4 mov wav jpg)
 
+# Folders to ignore during scan (configurable via config file)
+declare -a IGNORE_FOLDERS
+# Default folders if not specified in config
+IGNORE_FOLDERS=(.Trashes)
+
 # Duplicate file handling state
 DUPLICATE_ACTION=""
 APPLY_TO_ALL=false
@@ -113,13 +118,17 @@ OPTIONS:
     --help              Display this help message and exit
 
 CONFIG FILE FORMAT:
-    The config file has two optional sections:
+    The config file has three optional sections:
 
     1. FORMATS (optional) - Comma-separated list of file extensions to process
        Default: mp4,mov,wav,jpg
        Example: FORMATS=mp4,mov,lrv,wav,jpg
 
-    2. LABELS (optional) - SD Card UUID to Name Mapping
+    2. IGNORE_FOLDERS (optional) - Comma-separated list of folder names to skip
+       Default: .Trashes
+       Example: IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd
+
+    3. LABELS (optional) - SD Card UUID to Name Mapping
        Format: UUID=owner/cardname
        If not specified, SD card volume names will be used for organization
        Lines starting with # are comments
@@ -127,6 +136,9 @@ CONFIG FILE FORMAT:
     Example config file:
         # File formats to process (comma-separated, without dot)
         FORMATS=mp4,mov,lrv,wav,jpg,png
+
+        # Folders to ignore during scan (comma-separated)
+        IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd
 
         # SD Card Labels (optional - omit to use volume names)
         LABELS:
@@ -294,6 +306,19 @@ load_config() {
             continue
         fi
 
+        # Check for IGNORE_FOLDERS= line
+        if [[ "$line" =~ ^IGNORE_FOLDERS=(.+)$ ]]; then
+            local folders_value="${BASH_REMATCH[1]}"
+            # Parse comma-separated folder names
+            IFS=',' read -ra IGNORE_FOLDERS <<< "$folders_value"
+            # Trim whitespace from each folder name
+            for i in "${!IGNORE_FOLDERS[@]}"; do
+                IGNORE_FOLDERS[$i]=$(echo "${IGNORE_FOLDERS[$i]}" | tr -d ' ')
+            done
+            verbose "Loaded ignore folders: ${IGNORE_FOLDERS[*]}"
+            continue
+        fi
+
         # Check for LABELS: section header
         if [[ "$line" =~ ^LABELS:$ ]]; then
             found_labels_header=true
@@ -335,6 +360,13 @@ load_config() {
         FILE_FORMATS=(mp4 mov wav jpg)
     fi
     info "File formats: ${FILE_FORMATS[*]}"
+
+    # Show what folders we're ignoring
+    if [ ${#IGNORE_FOLDERS[@]} -eq 0 ]; then
+        # Should not happen due to defaults, but just in case
+        IGNORE_FOLDERS=(.Trashes)
+    fi
+    info "Ignore folders: ${IGNORE_FOLDERS[*]}"
 
     if [ "$uuid_count" -gt 0 ]; then
         info "Loaded $uuid_count SD card mapping(s)"
@@ -443,8 +475,28 @@ validate_source_uuids() {
 
         # Check if UUID exists in mapping
         if [ -z "$mapped_name" ]; then
+            # Get volume name to help identify the card
+            local volume_name=""
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                volume_name=$(basename "$source_path")
+            else
+                # On Linux, try to get the volume label
+                if command -v lsblk &> /dev/null; then
+                    local device
+                    device=$(df "$source_path" 2>/dev/null | tail -1 | awk '{print $1}')
+                    volume_name=$(lsblk -no LABEL "$device" 2>/dev/null || basename "$source_path")
+                else
+                    volume_name=$(basename "$source_path")
+                fi
+            fi
+            # Fallback to basename if empty
+            if [ -z "$volume_name" ]; then
+                volume_name=$(basename "$source_path")
+            fi
+
             echo ""
             error "Unknown SD card detected at: $source_path"
+            error "Volume name: $volume_name"
             error "Full UUID: $uuid"
             if [ "$uuid" != "$short_uuid" ]; then
                 error "Short UUID: $short_uuid"
@@ -609,8 +661,16 @@ extract_date() {
 find_media_files() {
     local source="$1"
 
-    # Build find command dynamically based on FILE_FORMATS array
-    local find_cmd="find \"$source\" -type f \\("
+    # Build find command dynamically based on FILE_FORMATS and IGNORE_FOLDERS arrays
+    local find_cmd="find \"$source\""
+
+    # Add exclusion patterns for ignored folders
+    for folder in "${IGNORE_FOLDERS[@]}"; do
+        find_cmd+=" -path \"*/${folder}/*\" -prune -o"
+    done
+
+    # Add file type filters
+    find_cmd+=" -type f \\("
     local first=true
 
     for format in "${FILE_FORMATS[@]}"; do
@@ -622,7 +682,7 @@ find_media_files() {
         fi
     done
 
-    find_cmd+=" \\) 2>/dev/null"
+    find_cmd+=" \\) -print 2>/dev/null"
 
     # Execute the dynamically built command
     eval "$find_cmd"
@@ -738,7 +798,15 @@ fix_file_dates() {
 
     # Find all media files in target directory using configured formats
     local files_to_fix
-    local find_cmd="find \"$target_dir\" -type f \\("
+    local find_cmd="find \"$target_dir\""
+
+    # Add exclusion patterns for ignored folders
+    for folder in "${IGNORE_FOLDERS[@]}"; do
+        find_cmd+=" -path \"*/${folder}/*\" -prune -o"
+    done
+
+    # Add file type filters
+    find_cmd+=" -type f \\("
     local first=true
 
     for format in "${FILE_FORMATS[@]}"; do
@@ -750,7 +818,7 @@ fix_file_dates() {
         fi
     done
 
-    find_cmd+=" \\) 2>/dev/null"
+    find_cmd+=" \\) -print 2>/dev/null"
     files_to_fix=$(eval "$find_cmd")
 
     if [ -z "$files_to_fix" ]; then
@@ -821,7 +889,6 @@ process_single_source() {
 
     # Combine SD card name and file count on one line
     info "$sdcard_name: Found $total_files media file(s)"
-    echo ""
 
     local current=0
     local file
@@ -836,8 +903,6 @@ process_single_source() {
         local target_dir="${TARGET_PATH}/${date}/${sdcard_name}"
         verbose "Target directory: $target_dir"
 
-        echo -n "[$current/$total_files] Processing: $(basename "$file")"
-
         # Use rsync_file instead of copy_file
         # Disable errexit temporarily to capture return code
         local result
@@ -846,19 +911,21 @@ process_single_source() {
         result=$?
         set -e
 
+        # Print the complete message at once (better for parallel processing)
+        local filename=$(basename "$file")
         case $result in
             0)
                 # File copied successfully
-                echo " - copied"
+                echo "[$current/$total_files] Processing: $filename - copied"
                 ;;
             2)
                 # File skipped (already exists)
-                echo " - skipped (exists)"
+                echo "[$current/$total_files] Processing: $filename - skipped (exists)"
                 ;;
             1)
                 # Error occurred
-                echo " - failed"
-                ERROR_FILES_LIST+=("$(basename "$file")")
+                echo "[$current/$total_files] Processing: $filename - failed"
+                ERROR_FILES_LIST+=("$filename")
                 ;;
         esac
     done

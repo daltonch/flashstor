@@ -4,6 +4,11 @@
 # If not specified, defaults to: mp4,mov,wav,jpg
 FORMATS=mp4,wav,jpg
 
+# Folders to ignore during scan (comma-separated)
+# If not specified, defaults to: .Trashes
+# Common macOS system folders: .Trashes, .Spotlight-V100, .fseventsd, .TemporaryItems
+IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd
+
 # SD Card Labels (optional - if omitted, volume names will be used)
 # Format: UUID=owner/cardname
 # Lines starting with # are comments and will be ignored
