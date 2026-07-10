@@ -594,35 +594,31 @@ extract_timestamp() {
     fi
 }
 
-# Find all media files
+# Find all media files honoring IGNORE_FOLDERS and FILE_FORMATS.
+# Built as an argument array (no eval): config values are user-controlled
+# and must never be interpreted by the shell.
 find_media_files() {
     local source="$1"
-
-    # Build find command dynamically based on FILE_FORMATS and IGNORE_FOLDERS arrays
-    local find_cmd="find \"$source\""
-
-    # Add exclusion patterns for ignored folders
-    for folder in "${IGNORE_FOLDERS[@]}"; do
-        find_cmd+=" -path \"*/${folder}/*\" -prune -o"
-    done
-
-    # Add file type filters
-    find_cmd+=" -type f \\("
+    local args=("$source")
+    local folder format
     local first=true
 
-    for format in "${FILE_FORMATS[@]}"; do
-        if [ "$first" = true ]; then
-            find_cmd+=" -iname \"*.${format}\""
-            first=false
-        else
-            find_cmd+=" -o -iname \"*.${format}\""
-        fi
+    for folder in "${IGNORE_FOLDERS[@]}"; do
+        args+=(-path "*/${folder}/*" -prune -o)
     done
 
-    find_cmd+=" \\) -print 2>/dev/null"
+    args+=(-type f '(')
+    for format in "${FILE_FORMATS[@]}"; do
+        if [ "$first" = true ]; then
+            first=false
+        else
+            args+=(-o)
+        fi
+        args+=(-iname "*.${format}")
+    done
+    args+=(')' -print)
 
-    # Execute the dynamically built command
-    eval "$find_cmd"
+    find "${args[@]}" 2>/dev/null
 }
 
 # Copy file using rsync with progress

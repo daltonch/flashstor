@@ -55,6 +55,15 @@ setup() {
     [ -z "$output" ]
 }
 
+@test "config values cannot inject shell commands" {
+    make_card "$CARD"
+    write_config "$BATS_TEST_TMPDIR/cfg.txt" \
+        "IGNORE_FOLDERS=.Trashes,\$(touch $BATS_TEST_TMPDIR/pwned)"
+    run "$SYNC" --source "$CARD" --target "$TARGET" --config "$BATS_TEST_TMPDIR/cfg.txt"
+    [ ! -f "$BATS_TEST_TMPDIR/pwned" ]
+    [ -f "$TARGET/20250315/CARD_A/GX010001.MP4" ]
+}
+
 @test "existing files are skipped, not overwritten" {
     make_card "$CARD"
     "$SYNC" --source "$CARD" --target "$TARGET" > /dev/null
