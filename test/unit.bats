@@ -33,11 +33,28 @@ load test_helper
     [ "$output" = "1h 2m 5s" ]
 }
 
-# --- get_short_uuid ---------------------------------------------------------
+# --- UUID to name mapping ---------------------------------------------------
+# get_volume_uuid is overridden in the sourced shell to simulate a card.
 
-@test "get_short_uuid passes through FAT32 short serials" {
-    run call get_short_uuid E957-B26D
-    [ "$output" = "E957-B26D" ]
+@test "get_sdcard_name resolves mapped name from FAT32 short serial" {
+    run call "get_volume_uuid() { echo E957-B26D; }
+        CONFIG_FILE=cfg; UUID_MAP[E957-B26D]=chad/Hero12
+        get_sdcard_name /Volumes/FOO"
+    [ "$output" = "chad/Hero12" ]
+}
+
+@test "get_sdcard_name resolves mapped name from full UUID" {
+    run call "get_volume_uuid() { echo 238ECE38-E071-3604-90C9-1234ABCD5678; }
+        CONFIG_FILE=cfg; UUID_MAP[238ECE38-E071-3604-90C9-1234ABCD5678]=pete/pd1
+        get_sdcard_name /Volumes/FOO"
+    [ "$output" = "pete/pd1" ]
+}
+
+@test "get_sdcard_name errors on unmapped UUID when mappings exist" {
+    run call "get_volume_uuid() { echo AAAA-BBBB; }
+        CONFIG_FILE=cfg; UUID_MAP[E957-B26D]=chad/Hero12
+        get_sdcard_name /Volumes/FOO"
+    [ "$status" -eq 4 ]
 }
 
 # --- extract_date -----------------------------------------------------------

@@ -406,30 +406,10 @@ load_config() {
     fi
 }
 
-# Extract short UUID from full UUID (for FAT32 compatibility)
-# FAT32 UUIDs are 4-4 format (e.g., 0119-B4DD)
-# Full UUIDs are 8-4-4-4-12 format
-get_short_uuid() {
-    local full_uuid="$1"
-
-    # If already in short format (contains only one hyphen), return as-is
-    if [[ "$full_uuid" =~ ^[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}$ ]]; then
-        echo "$full_uuid"
-        return 0
-    fi
-
-    # If in full format, extract last 4-4 bytes
-    # Example: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX -> last 4 digits before and after last hyphen
-    if [[ "$full_uuid" =~ -([0-9A-Fa-f]{4})([0-9A-Fa-f]{8})$ ]]; then
-        echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]:0:4}" | tr '[:lower:]' '[:upper:]'
-        return 0
-    fi
-
-    # Return original if no pattern matches
-    echo "$full_uuid"
-}
-
-# Get UUID of a mounted volume (cross-platform)
+# Get UUID of a mounted volume (cross-platform).
+# FAT32 volumes report their 4-4 serial (e.g. 0119-B4DD) directly from
+# diskutil/blkid; other filesystems report a full 8-4-4-4-12 UUID. Config
+# entries are matched against whatever the platform tools return.
 get_volume_uuid() {
     local mount_path="$1"
     local uuid=""
@@ -481,7 +461,8 @@ validate_source_uuids() {
     echo ""
 
     for source_path in "${SOURCE_PATHS[@]}"; do
-        local uuid=$(get_volume_uuid "$source_path")
+        local uuid
+        uuid=$(get_volume_uuid "$source_path")
 
         if [ -z "$uuid" ]; then
             error "Could not determine UUID for: $source_path"
@@ -489,25 +470,10 @@ validate_source_uuids() {
             exit 4
         fi
 
-        local short_uuid=$(get_short_uuid "$uuid")
-
-        # Show both UUIDs if they differ
-        if [ "$uuid" != "$short_uuid" ]; then
-            verbose "Detected UUID for $source_path: $uuid (short: $short_uuid)"
-        else
-            verbose "Detected UUID for $source_path: $uuid"
-        fi
-
-        # Try to match with short UUID first, then full UUID
-        local mapped_name=""
-        if [[ -v "UUID_MAP[$short_uuid]" ]]; then
-            mapped_name="${UUID_MAP[$short_uuid]}"
-        elif [[ -v "UUID_MAP[$uuid]" ]]; then
-            mapped_name="${UUID_MAP[$uuid]}"
-        fi
+        verbose "Detected UUID for $source_path: $uuid"
 
         # Check if UUID exists in mapping
-        if [ -z "$mapped_name" ]; then
+        if [[ ! -v "UUID_MAP[$uuid]" ]]; then
             # Get volume name to help identify the card
             local volume_name=""
             if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -530,23 +496,15 @@ validate_source_uuids() {
             echo ""
             error "Unknown SD card detected at: $source_path"
             error "Volume name: $volume_name"
-            error "Full UUID: $uuid"
-            if [ "$uuid" != "$short_uuid" ]; then
-                error "Short UUID: $short_uuid"
-            fi
+            error "UUID: $uuid"
             echo ""
             echo "Add this line to your config file ($CONFIG_FILE):"
-            echo "  $short_uuid=owner/cardname"
+            echo "  $uuid=owner/cardname"
             echo ""
             exit 4
         fi
 
-        # Display which UUID was used for matching
-        if [[ -v "UUID_MAP[$short_uuid]" ]]; then
-            success "Found mapping: $short_uuid -> $mapped_name"
-        else
-            success "Found mapping: $uuid -> $mapped_name"
-        fi
+        success "Found mapping: $uuid -> ${UUID_MAP[$uuid]}"
     done
 
     echo ""
@@ -599,16 +557,10 @@ get_sdcard_name() {
         exit 4
     fi
 
-    local short_uuid
-    short_uuid=$(get_short_uuid "$uuid")
-
-    # Try to match with short UUID first, then full UUID
-    if [[ -v "UUID_MAP[$short_uuid]" ]]; then
-        echo "${UUID_MAP[$short_uuid]}"
-    elif [[ -v "UUID_MAP[$uuid]" ]]; then
+    if [[ -v "UUID_MAP[$uuid]" ]]; then
         echo "${UUID_MAP[$uuid]}"
     else
-        error "No mapping found for UUID: $uuid (short: $short_uuid)"
+        error "No mapping found for UUID: $uuid"
         exit 4
     fi
 }
