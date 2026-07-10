@@ -123,6 +123,29 @@ setup() {
     [ -f "$TARGET/20250401/CARD_B/GX010001.MP4" ]
 }
 
+@test "dry-run reports would-copy totals and writes nothing" {
+    make_card "$CARD"
+    run "$SYNC" --source "$CARD" --target "$TARGET" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Total files to copy:  2"* ]]
+    [[ "$output" == *"Total size to copy:   14 B"* ]]
+    run find "$TARGET" -type f
+    [ -z "$output" ]
+}
+
+@test "dry-run counts skips and matches a subsequent real run" {
+    make_card "$CARD"
+    "$SYNC" --source "$CARD" --target "$TARGET" > /dev/null
+    rm "$TARGET/20250315/CARD_A/GX010002.MP4"
+    run "$SYNC" --source "$CARD" --target "$TARGET" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Total files to copy:  1"* ]]
+    [[ "$output" == *"Total files skipped:  1"* ]]
+    run "$SYNC" --source "$CARD" --target "$TARGET"
+    [[ "$output" == *"Total files copied:   1"* ]]
+    [[ "$output" == *"Total files skipped:  1"* ]]
+}
+
 @test "jpg with exif date is organized by capture date" {
     require_exiftool
     mkdir -p "$CARD/DCIM"

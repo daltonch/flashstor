@@ -638,24 +638,20 @@ rsync_file() {
     bytes_copied=$(stat_size_bytes "$source_file")
     bytes_copied=${bytes_copied:-0}
 
-    # Copy the file
-    if [ "$DRY_RUN" = true ]; then
-        echo " [DRY RUN] Would rsync"
-        return 0
-    fi
-
-    # Use rsync with progress
-    # --archive: preserve permissions, times, etc.
-    # --progress: show progress bar
-    # --info=progress2: show overall progress percentage
-    # --ignore-existing: skip files that exist in destination (natural duplicate handling)
-
-    # Check if file already exists (for skipped detection)
+    # Check if file already exists (for skipped detection); applies to dry
+    # runs too so the preview matches a real run
     if [ -f "$target_file" ]; then
         verbose "Skipped (exists): $filename"
         SOURCE_FILES_SKIPPED["$source_path"]=$((${SOURCE_FILES_SKIPPED["$source_path"]:-0} + 1))
         SKIPPED_FILES_LIST+=("$filename")
         return 2  # Return 2 to indicate skipped
+    fi
+
+    # Dry run: count what would be copied, write nothing
+    if [ "$DRY_RUN" = true ]; then
+        SOURCE_FILES_COPIED["$source_path"]=$((${SOURCE_FILES_COPIED["$source_path"]:-0} + 1))
+        SOURCE_BYTES_COPIED["$source_path"]=$((${SOURCE_BYTES_COPIED["$source_path"]:-0} + bytes_copied))
+        return 0
     fi
 
     # File doesn't exist, copy it
@@ -757,8 +753,12 @@ process_single_source() {
         filename=$(basename "$file")
         case $result in
             0)
-                # File copied successfully
-                echo "[$current/$total_files] Processing: $filename - copied"
+                # File copied successfully (or would be, in a dry run)
+                if [ "$DRY_RUN" = true ]; then
+                    echo "[$current/$total_files] Processing: $filename - would copy"
+                else
+                    echo "[$current/$total_files] Processing: $filename - copied"
+                fi
                 ;;
             2)
                 # File skipped (already exists)
@@ -989,10 +989,8 @@ print_summary() {
     echo ""
 
     if [ "$DRY_RUN" = true ]; then
-        success "Dry run completed"
-        info "Total time: $formatted_time"
-        echo "========================================"
-        return
+        warning "DRY RUN - nothing was copied; totals show what a real run would do"
+        echo ""
     fi
 
     # Per-source statistics (always show, even for single source)
@@ -1015,8 +1013,13 @@ print_summary() {
 
         echo ""
         info "SD Card: $sdcard_name"
-        echo "  Files copied:   $files_copied"
-        echo "  Size copied:    $formatted_bytes"
+        if [ "$DRY_RUN" = true ]; then
+            echo "  Files to copy:  $files_copied"
+            echo "  Size to copy:   $formatted_bytes"
+        else
+            echo "  Files copied:   $files_copied"
+            echo "  Size copied:    $formatted_bytes"
+        fi
         if [ "$files_skipped" -gt 0 ]; then
             echo "  Files skipped:  $files_skipped"
         fi
@@ -1032,10 +1035,15 @@ print_summary() {
     echo ""
     echo "Overall Statistics:"
     echo "----------------------------------------"
-    success "Total files copied:   $TOTAL_FILES_COPIED"
     local formatted_total_bytes
     formatted_total_bytes=$(format_bytes "$TOTAL_BYTES_COPIED")
-    success "Total size copied:    $formatted_total_bytes"
+    if [ "$DRY_RUN" = true ]; then
+        success "Total files to copy:  $TOTAL_FILES_COPIED"
+        success "Total size to copy:   $formatted_total_bytes"
+    else
+        success "Total files copied:   $TOTAL_FILES_COPIED"
+        success "Total size copied:    $formatted_total_bytes"
+    fi
 
     if [ "$TOTAL_FILES_SKIPPED" -gt 0 ]; then
         warning "Total files skipped:  $TOTAL_FILES_SKIPPED"
