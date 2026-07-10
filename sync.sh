@@ -257,6 +257,14 @@ info() {
     echo -e "${BLUE}$1${NC}"
 }
 
+# Trim leading/trailing whitespace (spaces and tabs), keep internal spaces
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 # Print verbose message
 verbose() {
     if [ "$VERBOSE" = true ]; then
@@ -323,9 +331,9 @@ load_config() {
             local formats_value="${BASH_REMATCH[1]}"
             # Parse comma-separated formats
             IFS=',' read -ra FILE_FORMATS <<< "$formats_value"
-            # Trim whitespace from each format
+            # Trim surrounding whitespace from each format
             for i in "${!FILE_FORMATS[@]}"; do
-                FILE_FORMATS[$i]=$(echo "${FILE_FORMATS[$i]}" | tr -d ' ')
+                FILE_FORMATS[i]=$(trim "${FILE_FORMATS[i]}")
             done
             verbose "Loaded formats: ${FILE_FORMATS[*]}"
             continue
@@ -336,9 +344,9 @@ load_config() {
             local folders_value="${BASH_REMATCH[1]}"
             # Parse comma-separated folder names
             IFS=',' read -ra IGNORE_FOLDERS <<< "$folders_value"
-            # Trim whitespace from each folder name
+            # Trim surrounding whitespace; folder names may contain spaces
             for i in "${!IGNORE_FOLDERS[@]}"; do
-                IGNORE_FOLDERS[$i]=$(echo "${IGNORE_FOLDERS[$i]}" | tr -d ' ')
+                IGNORE_FOLDERS[i]=$(trim "${IGNORE_FOLDERS[i]}")
             done
             verbose "Loaded ignore folders: ${IGNORE_FOLDERS[*]}"
             continue

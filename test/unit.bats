@@ -77,6 +77,20 @@ load test_helper
     [ "$output" = "mp4|wav|" ]
 }
 
+@test "load_config preserves internal spaces in IGNORE_FOLDERS" {
+    cfg="$BATS_TEST_TMPDIR/cfg.txt"
+    write_config "$cfg" 'IGNORE_FOLDERS=.Trashes, Temporary Items'
+    run call "load_config '$cfg' >/dev/null; printf '%s|' \"\${IGNORE_FOLDERS[@]}\""
+    [ "$output" = ".Trashes|Temporary Items|" ]
+}
+
+@test "load_config trims tabs around config values" {
+    cfg="$BATS_TEST_TMPDIR/cfg.txt"
+    printf 'FORMATS=\tmp4\t,\twav\t\n' > "$cfg"
+    run call "load_config '$cfg' >/dev/null; printf '%s|' \"\${FILE_FORMATS[@]}\""
+    [ "$output" = "mp4|wav|" ]
+}
+
 @test "load_config parses LABELS mappings" {
     cfg="$BATS_TEST_TMPDIR/cfg.txt"
     write_config "$cfg" 'LABELS:' 'E957-B26D=chad/Hero12'
