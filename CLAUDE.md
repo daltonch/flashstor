@@ -20,92 +20,85 @@ The target system is an Asustor Flashstor Pro 12 running Proxmox with:
 
 ### sync.sh - GoPro Media Importer
 
-**Purpose:** Cross-platform utility to import GoPro media (MP4/WAV) from one or more SD cards and organize by creation date.
+**Purpose:** Cross-platform utility to import GoPro media (MP4/WAV/JPG) from one or more SD cards and organize by capture date.
 
 **File Organization:**
 - With config: `<target>/<YYYYMMDD>/<mapped_name>/files` (e.g., `Backup/20251008/chad/Hero12/`)
 - Without config: `<target>/<YYYYMMDD>/<volume_name>/files` (e.g., `Backup/20251008/CDHero12/`)
 
-Date folders at TOP level enable browsing by date across multiple SD cards. Implemented in `process_single_source()` at line 732.
+Date folders at TOP level enable browsing by date across multiple SD cards. The path is built in `process_single_source()`.
 
-**Metadata Extraction Cascade:**
-1. `exiftool` (preferred) - Looks for CreateDate, MediaCreateDate, DateTimeOriginal
-2. `ffprobe` (fallback) - Extracts creation_time from video stream metadata
-3. File modification time (final fallback) - Uses `stat` command
+**Capture Date Extraction:**
+`extract_timestamp()` makes one metadata-tool call per file and returns the full capture timestamp in `touch -t` format (`YYYYMMDDhhmm.SS`), which drives both the date folder (first 8 characters) and the copied file's mtime:
 
-This ensures the script works without external dependencies. Logic in `extract_date()` function (lines 443-480).
+1. `exiftool` (preferred) - CreateDate, MediaCreateDate, DateTimeOriginal
+2. `ffprobe` (fallback) - creation_time from the video stream tags
+3. No tool or no metadata - the file's mtime picks the date folder (via `stat_mtime_date`) and rsync's `--archive` preserves the original mtime on the copy
+
+After a successful copy, `rsync_file()` sets the copy's mtime to the capture timestamp (when one was found). Only files copied by the current run are touched; existing archive content is never re-scanned.
 
 **Config File Sections (Optional):**
-The config file supports three optional sections:
 
 1. **FORMATS:** Comma-separated file extensions to process (default: mp4,mov,wav,jpg)
-2. **IGNORE_FOLDERS:** Comma-separated folder names to skip during scan (default: .Trashes)
+2. **IGNORE_FOLDERS:** Comma-separated folder names to skip during scan (default: .Trashes). Values may contain spaces; only surrounding whitespace is trimmed.
 3. **LABELS:** UUID to friendly name mappings for SD cards
 
+The config is only read when `--config <path>` is passed explicitly.
+
 **UUID Mapping (Optional):**
-- Config file format: `UUID=friendly/name` (one per line)
-- Default config: `sdcard_config.txt` (if present in current directory)
+- Config file format: `UUID=friendly/name` (one per line, under a `LABELS:` header)
 - Cross-platform UUID detection: macOS uses `diskutil`, Linux uses `lsblk`/`blkid`
-- Short UUID extraction for FAT32 compatibility (e.g., `E957-B26D`)
-- Unknown card detection: Exits immediately with helpful error message showing UUID
+- FAT32 cards report their 4-4 serial (e.g., `E957-B26D`) directly from the platform tools; config entries are matched verbatim against whatever UUID is detected
+- Unknown card detection: exits immediately with the exact config line to add
+- Config present but no LABELS entries: volume names are used, no UUID detection required
 
 **Folder Exclusion:**
 - Configurable via `IGNORE_FOLDERS` in config file
 - Default: `.Trashes` (macOS system folder)
 - Common additions: `.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`
-- Applied to both file discovery and date fixing operations
+- Applied by `find_media_files()`, which builds a `find` argument array (never `eval`; config values are user-controlled and must not be shell-interpreted)
 
 **Duplicate File Handling:**
-- Interactive prompt on first duplicate (skip/overwrite/rename/apply-to-all)
-- State stored in global variables `DUPLICATE_ACTION` and `APPLY_TO_ALL`
-- Managed by `handle_duplicate()` function (lines 488-558)
+Duplicates (same filename in the same destination folder) are automatically skipped, never overwritten. `rsync_file()` checks for the target file before copying, counts the skip, and records the filename for the summary. There is no interactive prompt.
 
 **Key Features:**
-- Multi-source support: Can process multiple SD cards in one invocation
-- Optional auto-eject: `--eject` flag unmounts cards after processing
-- Progress display: Uses `pv` if available, falls back to size display
-- Timestamp preservation: Uses `cp -p` to maintain original file timestamps
-- Platform compatibility: Handles macOS vs Linux differences in `stat`, mount points
-- Dual mode: Works with or without config file
+- Multi-source support: multiple `--source` flags process cards in parallel (background subshells; stats and skip/error lists round-trip through per-source temp files)
+- Optional auto-eject: `--eject` unmounts cards after processing
+- Timestamp handling: rsync `--archive` preserves mtimes; metadata capture dates overwrite the copy's mtime when available
+- Dual mode: works with or without a config file
+- `--dry-run` reports would-copy/skip totals without writing anything
 
 **Command Line Options:**
 ```bash
 --source <path>      # SD card mount point (can specify multiple times)
 --target <path>      # Destination directory
---config <path>      # UUID mapping config (optional, defaults to sdcard_config.txt)
+--config <path>      # Config file (optional; only used when passed)
 --eject              # Auto-eject cards after processing
---dry-run            # Preview without copying
+--dry-run            # Preview with would-copy totals, no writes
 --verbose            # Detailed output
-```
-
-**Usage Examples:**
-```bash
-# Basic usage with auto-detected config
-./sync.sh --source /Volumes/GOPRO --target ~/Backup
-
-# Multiple cards with auto-eject
-./sync.sh --source /Volumes/GOPRO1 --source /Volumes/GOPRO2 --target ~/Backup --eject
-
-# Without config (uses volume names)
-./sync.sh --source /Volumes/GOPRO --target ~/Backup --config /dev/null
-
-# Preview operations
-./sync.sh --source /Volumes/GOPRO --target ~/Backup --dry-run --verbose
 ```
 
 **Execution Flow:**
 1. Argument parsing (`parse_args`)
 2. Validation (`validate_args`)
-3. Config loading if present (`load_config`)
-4. UUID validation if config loaded (`validate_source_uuids`)
-5. Dependency check (`check_dependencies`)
-6. For each source path:
+3. Config loading if `--config` given (`load_config`), then UUID validation (`validate_source_uuids`)
+4. Dependency check (`check_dependencies`)
+5. For each source path (parallel when multiple):
    - SD card name detection (`get_sdcard_name`)
    - File discovery (`find_media_files`)
-   - Processing loop (`process_single_source`)
-     - Extract date → Build target path → Copy file → Handle duplicates
+   - Processing loop (`process_single_source`): extract timestamp, build target path, copy (`rsync_file`), set capture-date mtime
    - Optional auto-eject
-7. Summary statistics (`print_summary`)
+6. Summary statistics (`print_summary`)
+
+## Testing
+
+The bats-core suite lives in `test/` (`bats test/`):
+- `test/unit.bats` sources sync.sh (main only runs when executed) and exercises individual functions
+- `test/integration.bats` runs the script end-to-end against fixture SD cards generated in a temp dir
+- `test/test_helper.bash` provides fixtures, including a metadata-capable 1x1 JPEG and an exiftool-counting PATH shim
+- A test enforces that `shellcheck sync.sh` stays clean
+
+Run the suite before and after any change to sync.sh. Write a failing test first for behavior changes.
 
 ## Important Implementation Details
 
@@ -116,18 +109,21 @@ YYYYMMDD format (e.g., 20251022) with NO separators:
 - No special character handling needed
 
 ### Error Handling
-Both scripts use `set -euo pipefail`:
+`set -euo pipefail` is active:
 - `e`: Exit on error
 - `u`: Exit on undefined variable
 - `pipefail`: Return exit code of failed command in pipeline
 
-Operations that may fail gracefully (like file copies) are wrapped in conditionals.
+Operations that may fail gracefully (file copies, metadata reads) capture their status explicitly (`set +e` around the call, or `|| true` inside assignments). Avoid `local x=$(cmd)`; declare and assign separately so failures are not masked (shellcheck SC2155).
+
+### stat Flavor
+`stat` syntax is detected by capability (`stat --version` probe), not OS type: PATH may put GNU coreutils first even on macOS. Use the `stat_size_bytes` / `stat_mtime_date` helpers instead of calling `stat` directly.
 
 ### Bash Version Requirement
 The script requires bash 4.0+ for associative array support. On macOS, the default bash is 3.2, so you need:
 ```bash
 brew install bash
-/usr/local/bin/bash sync.sh [arguments]
+/opt/homebrew/bin/bash sync.sh [arguments]
 ```
 
 The script includes a version check that provides installation instructions if needed.
@@ -135,38 +131,39 @@ The script includes a version check that provides installation instructions if n
 ## Modifying sync.sh
 
 ### Change Directory Structure
-The folder structure is set in ONE location (`process_single_source` function, line 732):
+The folder structure is set in ONE location (`process_single_source`):
 ```bash
 local target_dir="${TARGET_PATH}/${date}/${sdcard_name}"
 ```
 
 Also update:
-- Help text in `show_help()` function (line 50)
+- Help text in `show_help()`
 - This CLAUDE.md file
+- The layout assertions in `test/integration.bats`
 
 ### Add File Types
-Edit `sdcard_config.txt` and modify the FORMATS line:
+Edit the config file's FORMATS line:
 ```
 FORMATS=mp4,mov,wav,jpg,newtype
 ```
 
-The script dynamically builds the find command based on this configuration. No code changes needed.
+`find_media_files()` builds its find arguments from this configuration. No code changes needed.
 
 ### Add/Modify Ignored Folders
-Edit `sdcard_config.txt` and modify the IGNORE_FOLDERS line:
+Edit the config file's IGNORE_FOLDERS line:
 ```
-IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd,.TemporaryItems,DCIM/MISC
+IGNORE_FOLDERS=.Trashes,.Spotlight-V100,.fseventsd,.TemporaryItems
 ```
 
-The script dynamically builds folder exclusion patterns. Both `find_media_files()` and `fix_file_dates()` use this configuration. No code changes needed.
+No code changes needed.
 
 ### Add Metadata Tools
-1. Add detection in `check_dependencies()` (line 198)
-2. Add extraction logic in `extract_date()` (line 443) as new case statement
-3. Update help text in `show_help()` (line 50)
+1. Add detection in `check_dependencies()`
+2. Add a case in `extract_timestamp()` that yields `YYYYMMDDhhmm.SS`
+3. Update help text in `show_help()` and add a unit test
 
 ### Add New SD Cards to Config
-Edit `sdcard_config.txt` and add:
+Edit `sdcard_config.txt` and add under `LABELS:`:
 ```
 UUID=owner/cardname
 ```
@@ -181,7 +178,7 @@ The script will show you the exact line to add if it encounters an unknown card.
 
 ### macOS vs Linux
 - SD card detection: macOS uses `/Volumes/`, Linux uses `/media/` or `/mnt/`
-- `stat` syntax: macOS uses `-f`, Linux uses `-c`
+- `stat` syntax: detected by capability, see above
 - Unmount: macOS uses `diskutil unmount`, Linux uses `umount`
 
 ### Script Compatibility

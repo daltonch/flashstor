@@ -214,7 +214,7 @@ Files are organized by date with SD card identifiers as subfolders.
 
 ### Duplicate File Handling
 
-The script uses `rsync` with `--ignore-existing` flag, which automatically skips files that already exist in the destination. This is ideal for:
+The script checks the destination before copying and skips any file that already exists there; existing files are never overwritten. This is ideal for:
 - Incremental backups (only new files are copied)
 - Parallel SD card processing (no interactive prompts needed)
 - Safe re-runs (won't overwrite existing files)
@@ -294,3 +294,33 @@ Since macOS ships with bash 3.2, you need to use the Homebrew-installed bash:
 ```
 
 The script will display an error with installation instructions if you try to run it with bash 3.2.
+
+### Shell Completions (fish)
+
+Tab completions for all `sync.sh` flags are provided in `sync.fish`. To install:
+
+```fish
+cp sync.fish ~/.config/fish/completions/sync.fish
+```
+
+Or source it from your fish config:
+
+```fish
+source /path/to/flashstor/sync.fish
+```
+
+### Running Tests
+
+The test suite uses [bats-core](https://github.com/bats-core/bats-core):
+
+```bash
+# Install (macOS)
+brew install bats-core
+
+# Run the whole suite
+bats test/
+```
+
+`exiftool` is used by the metadata tests; those tests are skipped automatically
+if it is not installed. Fixture SD cards are generated in a temp directory at
+test time, so no test data is stored in the repo.
