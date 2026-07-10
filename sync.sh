@@ -65,10 +65,6 @@ declare -a IGNORE_FOLDERS
 # Default folders if not specified in config
 IGNORE_FOLDERS=(.Trashes)
 
-# Duplicate file handling state
-DUPLICATE_ACTION=""
-APPLY_TO_ALL=false
-
 # Detect stat flavor by capability: PATH may put GNU coreutils first even on
 # macOS, so OS type alone cannot pick the right stat syntax
 STAT_IS_GNU=false
@@ -318,7 +314,6 @@ load_config() {
 
     verbose "Loading config from: $config_file"
 
-    local in_labels_section=false
     local found_labels_header=false
 
     # Read config file line by line
@@ -355,7 +350,6 @@ load_config() {
         # Check for LABELS: section header
         if [[ "$line" =~ ^LABELS:$ ]]; then
             found_labels_header=true
-            in_labels_section=true
             verbose "Found LABELS section"
             continue
         fi
@@ -423,14 +417,16 @@ get_volume_uuid() {
         fi
         # If still empty, try getting the device UUID (for FAT32 volumes)
         if [ -z "$uuid" ]; then
-            local device=$(diskutil info "$mount_path" 2>/dev/null | grep "Device Node:" | awk '{print $3}')
+            local device
+            device=$(diskutil info "$mount_path" 2>/dev/null | grep "Device Node:" | awk '{print $3}')
             if [ -n "$device" ]; then
                 uuid=$(diskutil info "$device" 2>/dev/null | grep "Volume UUID:" | awk '{print $3}')
             fi
         fi
     else
         # Linux - use lsblk or blkid
-        local device=$(df "$mount_path" 2>/dev/null | tail -1 | awk '{print $1}')
+        local device
+        device=$(df "$mount_path" 2>/dev/null | tail -1 | awk '{print $1}')
         if [ -n "$device" ]; then
             if command -v lsblk &> /dev/null; then
                 uuid=$(lsblk -n -o UUID "$device" 2>/dev/null)
@@ -664,12 +660,12 @@ rsync_file() {
 
     # File doesn't exist, copy it
     # Show progress bar only if verbose mode is enabled
-    local rsync_opts="--archive"
+    local rsync_opts=(--archive)
     if [ "$VERBOSE" = true ]; then
-        rsync_opts="$rsync_opts --progress --human-readable"
+        rsync_opts+=(--progress --human-readable)
     fi
 
-    if rsync $rsync_opts "$source_file" "$target_dir/" >/dev/null; then
+    if rsync "${rsync_opts[@]}" "$source_file" "$target_dir/" >/dev/null; then
         verbose "Copied: $filename -> $target_dir"
         SOURCE_FILES_COPIED["$source_path"]=$((${SOURCE_FILES_COPIED["$source_path"]:-0} + 1))
         SOURCE_BYTES_COPIED["$source_path"]=$((${SOURCE_BYTES_COPIED["$source_path"]:-0} + bytes_copied))
@@ -692,7 +688,8 @@ rsync_file() {
 process_single_source() {
     local source_path="$1"
     local tool="$2"
-    local sdcard_name=$(get_sdcard_name "$source_path")
+    local sdcard_name
+    sdcard_name=$(get_sdcard_name "$source_path")
 
     # Initialize per-source statistics
     SOURCE_FILES_COPIED["$source_path"]=0
@@ -701,7 +698,8 @@ process_single_source() {
     SOURCE_FILES_ERROR["$source_path"]=0
 
     # Track start time
-    local start_time=$(date +%s)
+    local start_time end_time
+    start_time=$(date +%s)
 
     verbose "Scanning for media files in $source_path..."
 
@@ -720,7 +718,7 @@ process_single_source() {
     if [ "$total_files" -eq 0 ]; then
         warning "$sdcard_name: No media files found"
         # Track end time even if no files
-        local end_time=$(date +%s)
+        end_time=$(date +%s)
         SOURCE_TIME_ELAPSED["$source_path"]=$((end_time - start_time))
         return 0
     fi
@@ -755,7 +753,8 @@ process_single_source() {
         set -e
 
         # Print the complete message at once (better for parallel processing)
-        local filename=$(basename "$file")
+        local filename
+        filename=$(basename "$file")
         case $result in
             0)
                 # File copied successfully
@@ -775,7 +774,7 @@ process_single_source() {
     echo ""
 
     # Track end time
-    local end_time=$(date +%s)
+    end_time=$(date +%s)
     SOURCE_TIME_ELAPSED["$source_path"]=$((end_time - start_time))
 
     # Unmount the SD card after processing if --eject flag is set
@@ -810,11 +809,11 @@ process_sources_parallel() {
     local sources=("$@")
 
     # Create temporary directory for inter-process communication
-    local temp_dir=$(mktemp -d)
+    local temp_dir
+    temp_dir=$(mktemp -d)
 
-    # Array to store background job PIDs and their corresponding source paths
+    # Array to store background job PIDs
     local -a pids=()
-    declare -A pid_to_source
 
     # Launch each source processing in background
     for src_idx in "${!sources[@]}"; do
@@ -856,9 +855,7 @@ EOF
 
             exit $exit_code
         ) &
-        local pid=$!
-        pids+=($pid)
-        pid_to_source[$pid]="$source_path"
+        pids+=("$!")
     done
 
     # Wait for all background jobs to complete
@@ -876,6 +873,7 @@ EOF
         if [ -f "$stat_file" ]; then
             # Source the stats file to get variables
             local FILES_COPIED=0 BYTES_COPIED=0 FILES_SKIPPED=0 FILES_ERROR=0 TIME_ELAPSED=0
+            # shellcheck source=/dev/null
             source "$stat_file"
 
             # Store in parent's associative arrays
@@ -916,7 +914,8 @@ EOF
 
 # Main processing function
 process_files() {
-    local tool=$(check_dependencies)
+    local tool
+    tool=$(check_dependencies)
 
     echo ""
     info "Target Directory: $TARGET_PATH"
@@ -978,9 +977,10 @@ format_bytes() {
 
 # Print summary
 print_summary() {
-    local end_time=$(date +%s)
-    local elapsed=$((end_time - START_TIME))
-    local formatted_time=$(format_time $elapsed)
+    local end_time elapsed formatted_time
+    end_time=$(date +%s)
+    elapsed=$((end_time - START_TIME))
+    formatted_time=$(format_time "$elapsed")
 
     echo ""
     echo "========================================"
@@ -1003,23 +1003,24 @@ print_summary() {
     fi
     echo "----------------------------------------"
     for source_path in "${SOURCE_PATHS[@]}"; do
-        local sdcard_name=$(get_sdcard_name "$source_path")
+        local sdcard_name formatted_bytes formatted_time_src
+        sdcard_name=$(get_sdcard_name "$source_path")
         local files_copied=${SOURCE_FILES_COPIED["$source_path"]:-0}
         local bytes_copied=${SOURCE_BYTES_COPIED["$source_path"]:-0}
         local files_skipped=${SOURCE_FILES_SKIPPED["$source_path"]:-0}
         local files_error=${SOURCE_FILES_ERROR["$source_path"]:-0}
         local time_elapsed=${SOURCE_TIME_ELAPSED["$source_path"]:-0}
-        local formatted_bytes=$(format_bytes $bytes_copied)
-        local formatted_time_src=$(format_time $time_elapsed)
+        formatted_bytes=$(format_bytes "$bytes_copied")
+        formatted_time_src=$(format_time "$time_elapsed")
 
         echo ""
         info "SD Card: $sdcard_name"
         echo "  Files copied:   $files_copied"
         echo "  Size copied:    $formatted_bytes"
-        if [ $files_skipped -gt 0 ]; then
+        if [ "$files_skipped" -gt 0 ]; then
             echo "  Files skipped:  $files_skipped"
         fi
-        if [ $files_error -gt 0 ]; then
+        if [ "$files_error" -gt 0 ]; then
             echo "  Files error:    $files_error"
         fi
         echo "  Time taken:     $formatted_time_src"
@@ -1032,14 +1033,15 @@ print_summary() {
     echo "Overall Statistics:"
     echo "----------------------------------------"
     success "Total files copied:   $TOTAL_FILES_COPIED"
-    local formatted_total_bytes=$(format_bytes $TOTAL_BYTES_COPIED)
+    local formatted_total_bytes
+    formatted_total_bytes=$(format_bytes "$TOTAL_BYTES_COPIED")
     success "Total size copied:    $formatted_total_bytes"
 
-    if [ $TOTAL_FILES_SKIPPED -gt 0 ]; then
+    if [ "$TOTAL_FILES_SKIPPED" -gt 0 ]; then
         warning "Total files skipped:  $TOTAL_FILES_SKIPPED"
     fi
 
-    if [ $TOTAL_FILES_ERROR -gt 0 ]; then
+    if [ "$TOTAL_FILES_ERROR" -gt 0 ]; then
         error "Total files error:    $TOTAL_FILES_ERROR"
     fi
 

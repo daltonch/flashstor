@@ -11,6 +11,12 @@ load test_helper
     [ -z "$output" ]
 }
 
+@test "shellcheck reports no issues" {
+    command -v shellcheck >/dev/null || skip "shellcheck not installed"
+    run shellcheck "$SYNC"
+    [ "$status" -eq 0 ]
+}
+
 # --- formatting helpers -----------------------------------------------------
 
 @test "format_bytes keeps small byte values exact" {
