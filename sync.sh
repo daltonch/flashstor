@@ -52,8 +52,8 @@ TOTAL_FILES_SKIPPED=0
 TOTAL_FILES_ERROR=0
 
 # Lists for tracking
-declare -a SKIPPED_FILES_LIST
-declare -a ERROR_FILES_LIST
+declare -a SKIPPED_FILES_LIST=()
+declare -a ERROR_FILES_LIST=()
 
 # File formats to process (configurable via config file)
 declare -a FILE_FORMATS
@@ -855,9 +855,8 @@ process_single_source() {
                 echo "[$current/$total_files] Processing: $filename - skipped (exists)"
                 ;;
             1)
-                # Error occurred
+                # Error occurred (rsync_file already recorded the filename)
                 echo "[$current/$total_files] Processing: $filename - failed"
-                ERROR_FILES_LIST+=("$filename")
                 ;;
         esac
     done
@@ -912,14 +911,16 @@ process_sources_parallel() {
     declare -A pid_to_source
 
     # Launch each source processing in background
-    for source_path in "${sources[@]}"; do
+    for src_idx in "${!sources[@]}"; do
+        source_path="${sources[$src_idx]}"
         (
             # Each background process runs process_single_source
             process_single_source "$source_path" "$tool"
             exit_code=$?
 
-            # Write statistics to temp file for parent to read
-            local stat_file="${temp_dir}/$(basename "$source_path").stats"
+            # Write statistics to temp files for parent to read (keyed by
+            # index: volume basenames are not guaranteed unique)
+            local stat_file="${temp_dir}/src-${src_idx}.stats"
             cat > "$stat_file" << EOF
 FILES_COPIED=${SOURCE_FILES_COPIED["$source_path"]:-0}
 BYTES_COPIED=${SOURCE_BYTES_COPIED["$source_path"]:-0}
@@ -927,6 +928,15 @@ FILES_SKIPPED=${SOURCE_FILES_SKIPPED["$source_path"]:-0}
 FILES_ERROR=${SOURCE_FILES_ERROR["$source_path"]:-0}
 TIME_ELAPSED=${SOURCE_TIME_ELAPSED["$source_path"]:-0}
 EOF
+
+            # Filename lists live in this subshell only; hand them to the
+            # parent alongside the counts
+            if [ ${#SKIPPED_FILES_LIST[@]} -gt 0 ]; then
+                printf '%s\n' "${SKIPPED_FILES_LIST[@]}" > "${temp_dir}/src-${src_idx}.skipped"
+            fi
+            if [ ${#ERROR_FILES_LIST[@]} -gt 0 ]; then
+                printf '%s\n' "${ERROR_FILES_LIST[@]}" > "${temp_dir}/src-${src_idx}.errors"
+            fi
 
             # Report completion
             sdcard_name=$(get_sdcard_name "$source_path")
@@ -954,8 +964,9 @@ EOF
     done
 
     # Read statistics from temp files and aggregate
-    for source_path in "${sources[@]}"; do
-        local stat_file="${temp_dir}/$(basename "$source_path").stats"
+    for src_idx in "${!sources[@]}"; do
+        source_path="${sources[$src_idx]}"
+        local stat_file="${temp_dir}/src-${src_idx}.stats"
         if [ -f "$stat_file" ]; then
             # Source the stats file to get variables
             local FILES_COPIED=0 BYTES_COPIED=0 FILES_SKIPPED=0 FILES_ERROR=0 TIME_ELAPSED=0
@@ -973,6 +984,21 @@ EOF
             TOTAL_BYTES_COPIED=$((TOTAL_BYTES_COPIED + BYTES_COPIED))
             TOTAL_FILES_SKIPPED=$((TOTAL_FILES_SKIPPED + FILES_SKIPPED))
             TOTAL_FILES_ERROR=$((TOTAL_FILES_ERROR + FILES_ERROR))
+        fi
+
+        # Merge the per-source filename lists back into the parent's lists
+        local list_file
+        list_file="${temp_dir}/src-${src_idx}.skipped"
+        if [ -f "$list_file" ]; then
+            while IFS= read -r line; do
+                SKIPPED_FILES_LIST+=("$line")
+            done < "$list_file"
+        fi
+        list_file="${temp_dir}/src-${src_idx}.errors"
+        if [ -f "$list_file" ]; then
+            while IFS= read -r line; do
+                ERROR_FILES_LIST+=("$line")
+            done < "$list_file"
         fi
     done
 

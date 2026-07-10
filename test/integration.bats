@@ -73,6 +73,37 @@ setup() {
     [ "$(grep -c '^  - GX010001.MP4$' <<< "$output")" -eq 1 ]
 }
 
+@test "errored files are listed exactly once in the summary" {
+    make_card "$CARD"
+    chmod 000 "$CARD/DCIM/100GOPRO/GX010001.MP4"
+    run "$SYNC" --source "$CARD" --target "$TARGET"
+    [ "$status" -eq 1 ]
+    [ "$(grep -c '^  - GX010001.MP4$' <<< "$output")" -eq 1 ]
+}
+
+@test "parallel mode lists skipped files in the summary" {
+    make_card "$CARD"
+    card_b="$BATS_TEST_TMPDIR/CARD_B"
+    make_card "$card_b" 202504010900
+    "$SYNC" --source "$CARD" --target "$TARGET" > /dev/null
+    "$SYNC" --source "$card_b" --target "$TARGET" > /dev/null
+    run "$SYNC" --source "$CARD" --source "$card_b" --target "$TARGET"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Total files skipped:  4"* ]]
+    [ "$(grep -c '^  - GX010001.MP4$' <<< "$output")" -eq 2 ]
+    [ "$(grep -c '^  - GX010002.MP4$' <<< "$output")" -eq 2 ]
+}
+
+@test "parallel mode lists errored files in the summary" {
+    make_card "$CARD"
+    card_b="$BATS_TEST_TMPDIR/CARD_B"
+    make_card "$card_b" 202504010900
+    chmod 000 "$CARD/DCIM/100GOPRO/GX010001.MP4"
+    run "$SYNC" --source "$CARD" --source "$card_b" --target "$TARGET"
+    [ "$status" -eq 1 ]
+    [ "$(grep -c '^  - GX010001.MP4$' <<< "$output")" -eq 1 ]
+}
+
 @test "multiple sources are all imported (parallel mode)" {
     make_card "$CARD"
     card_b="$BATS_TEST_TMPDIR/CARD_B"
