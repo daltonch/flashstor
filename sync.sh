@@ -565,34 +565,32 @@ get_sdcard_name() {
     fi
 }
 
-# Extract date from file using metadata
-extract_date() {
+# Extract capture timestamp from file metadata, in touch -t format
+# (YYYYMMDDhhmm.SS). Prints nothing when no usable capture date exists;
+# callers fall back to the file's mtime. One metadata-tool invocation per
+# file: the result drives both the date folder and the mtime fix.
+extract_timestamp() {
     local file="$1"
     local tool="$2"
-    local date_str=""
+    local ts=""
 
     case "$tool" in
         exiftool)
-            # Try to get CreateDate or MediaCreateDate from exiftool
-            # `|| true`: a file without date tags must fall through to mtime
-            date_str=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}' || true)
+            # `|| true`: a file without date tags must fall through cleanly
+            ts=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d%H%M.%S" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}' || true)
             ;;
         ffprobe)
-            # Try to get creation_time from ffprobe
-            date_str=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_tags=creation_time -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | cut -d'T' -f1 | tr -d '-' || true)
-            ;;
-        none)
-            # Use file modification time
-            date_str=$(stat_mtime_date "$file" || true)
+            local raw
+            raw=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_tags=creation_time -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || true)
+            # e.g. 2025-01-15T10:30:25.000000Z -> 202501151030.25
+            if [[ "$raw" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2}) ]]; then
+                ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}${BASH_REMATCH[5]}.${BASH_REMATCH[6]}"
+            fi
             ;;
     esac
 
-    # Validate date format (YYYYMMDD)
-    if [[ "$date_str" =~ ^[0-9]{8}$ ]]; then
-        echo "$date_str"
-    else
-        # Fallback to file modification time
-        stat_mtime_date "$file"
+    if [[ "$ts" =~ ^[0-9]{12}\.[0-9]{2}$ ]]; then
+        printf '%s' "$ts"
     fi
 }
 
@@ -627,39 +625,14 @@ find_media_files() {
     eval "$find_cmd"
 }
 
-# Get human-readable file size
-get_file_size() {
-    local file="$1"
-    local size_bytes
-
-    size_bytes=$(stat_size_bytes "$file")
-
-    # Check if we got a valid size
-    if [ -z "$size_bytes" ] || ! [[ "$size_bytes" =~ ^[0-9]+$ ]]; then
-        echo "unknown"
-        return 1
-    fi
-
-    # Convert to human-readable format
-    if [ "$size_bytes" -ge 1073741824 ]; then
-        printf "%.1fGB" "$(echo "$size_bytes" | awk '{printf "%.1f", $1/1073741824}')"
-    elif [ "$size_bytes" -ge 1048576 ]; then
-        printf "%.1fMB" "$(echo "$size_bytes" | awk '{printf "%.1f", $1/1048576}')"
-    elif [ "$size_bytes" -ge 1024 ]; then
-        printf "%.1fKB" "$(echo "$size_bytes" | awk '{printf "%.1f", $1/1024}')"
-    else
-        echo "${size_bytes}B"
-    fi
-}
-
 # Copy file using rsync with progress
 rsync_file() {
     local source_file="$1"
     local target_dir="$2"
-    local source_path="$3"  # For tracking stats
+    local source_path="$3"   # For tracking stats
+    local timestamp="$4"     # Capture timestamp (touch -t format) or empty
     local filename
     local target_file
-    local file_size
     local bytes_copied=0
 
     filename=$(basename "$source_file")
@@ -669,9 +642,6 @@ rsync_file() {
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$target_dir"
     fi
-
-    # Get file size for statistics
-    file_size=$(get_file_size "$source_file")
 
     bytes_copied=$(stat_size_bytes "$source_file")
     bytes_copied=${bytes_copied:-0}
@@ -707,78 +677,18 @@ rsync_file() {
         verbose "Copied: $filename -> $target_dir"
         SOURCE_FILES_COPIED["$source_path"]=$((${SOURCE_FILES_COPIED["$source_path"]:-0} + 1))
         SOURCE_BYTES_COPIED["$source_path"]=$((${SOURCE_BYTES_COPIED["$source_path"]:-0} + bytes_copied))
+
+        # Align the copy's mtime with the capture date (rsync already
+        # preserved the source mtime for files without metadata)
+        if [ -n "$timestamp" ]; then
+            touch -t "$timestamp" "$target_file" 2>/dev/null || true
+        fi
         return 0
     else
         error "Failed to copy: $filename"
         SOURCE_FILES_ERROR["$source_path"]=$((${SOURCE_FILES_ERROR["$source_path"]:-0} + 1))
         ERROR_FILES_LIST+=("$filename")
         return 1
-    fi
-}
-
-# Fix file dates using exiftool to match video capture date
-fix_file_dates() {
-    local target_dir="$1"
-    local tool="$2"
-
-    if [ "$tool" != "exiftool" ]; then
-        verbose "Skipping date fix - exiftool not available"
-        return 0
-    fi
-
-    verbose "Fixing file dates to match video capture dates..."
-
-    # Find all media files in target directory using configured formats
-    local files_to_fix
-    local find_cmd="find \"$target_dir\""
-
-    # Add exclusion patterns for ignored folders
-    for folder in "${IGNORE_FOLDERS[@]}"; do
-        find_cmd+=" -path \"*/${folder}/*\" -prune -o"
-    done
-
-    # Add file type filters
-    find_cmd+=" -type f \\("
-    local first=true
-
-    for format in "${FILE_FORMATS[@]}"; do
-        if [ "$first" = true ]; then
-            find_cmd+=" -iname \"*.${format}\""
-            first=false
-        else
-            find_cmd+=" -o -iname \"*.${format}\""
-        fi
-    done
-
-    find_cmd+=" \\) -print 2>/dev/null"
-    files_to_fix=$(eval "$find_cmd")
-
-    if [ -z "$files_to_fix" ]; then
-        return 0
-    fi
-
-    local fixed_count=0
-    while IFS= read -r file; do
-        if [ -f "$file" ]; then
-            # Extract creation date from video metadata
-            # Temporarily disable errexit for exiftool operations
-            set +e
-            local create_date
-            create_date=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d%H%M.%S" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}' | tr -d ':' | sed 's/^\([0-9]\{8\}\) \([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1\2\3.\4/')
-            set -e
-
-            if [ -n "$create_date" ] && [[ "$create_date" =~ ^[0-9]{12}\.[0-9]{2}$ ]]; then
-                # Set file modification time to match video capture date
-                if touch -t "$create_date" "$file" 2>/dev/null; then
-                    fixed_count=$((fixed_count + 1))
-                    verbose "  Fixed date for: $(basename "$file")"
-                fi
-            fi
-        fi
-    done <<< "$files_to_fix"
-
-    if [ $fixed_count -gt 0 ]; then
-        info "Fixed dates for $fixed_count file(s)"
     fi
 }
 
@@ -828,18 +738,23 @@ process_single_source() {
         current=$((current + 1))
 
         verbose "Extracting date for file: $file"
-        local date
-        date=$(extract_date "$file" "$tool")
+        local timestamp date
+        timestamp=$(extract_timestamp "$file" "$tool")
+        if [ -n "$timestamp" ]; then
+            date="${timestamp:0:8}"
+        else
+            # No capture metadata - organize by file modification time
+            date=$(stat_mtime_date "$file")
+        fi
         verbose "Extracted date: $date"
 
         local target_dir="${TARGET_PATH}/${date}/${sdcard_name}"
         verbose "Target directory: $target_dir"
 
-        # Use rsync_file instead of copy_file
         # Disable errexit temporarily to capture return code
         local result
         set +e
-        rsync_file "$file" "$target_dir" "$source_path"
+        rsync_file "$file" "$target_dir" "$source_path" "$timestamp"
         result=$?
         set -e
 
@@ -862,11 +777,6 @@ process_single_source() {
     done
 
     echo ""
-
-    # Fix file dates using exiftool after all files are copied
-    if [ "$DRY_RUN" = false ] && [ "$tool" = "exiftool" ]; then
-        fix_file_dates "${TARGET_PATH}" "$tool"
-    fi
 
     # Track end time
     local end_time=$(date +%s)

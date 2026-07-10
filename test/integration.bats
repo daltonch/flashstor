@@ -132,3 +132,31 @@ setup() {
     run "$SYNC" --source "$CARD" --target "$TARGET"
     [ "$(file_mtime "$TARGET/20250115/CARD_A/photo.jpg")" = "202501151030.25" ]
 }
+
+@test "files from previous runs are not re-touched" {
+    require_exiftool
+    # A file imported earlier, with mtime deliberately different from its
+    # capture date; a new import must not rewrite it
+    prior="$TARGET/20240101/OLDCARD"
+    mkdir -p "$prior"
+    make_jpg_with_date "$prior/old.jpg" '2024:01:01 08:00:00'
+    touch -t 202507070707 "$prior/old.jpg"
+
+    mkdir -p "$CARD/DCIM"
+    make_jpg_with_date "$CARD/DCIM/new.jpg" '2025:01:15 10:30:25'
+    run "$SYNC" --source "$CARD" --target "$TARGET"
+    [ "$status" -eq 0 ]
+    [ "$(file_mtime "$prior/old.jpg")" = "202507070707.00" ]
+}
+
+@test "at most one exiftool invocation per imported file" {
+    require_exiftool
+    mkdir -p "$CARD/DCIM"
+    make_jpg_with_date "$CARD/DCIM/one.jpg" '2025:01:15 10:30:25'
+    make_jpg_with_date "$CARD/DCIM/two.jpg" '2025:01:16 11:00:00'
+    count="$BATS_TEST_TMPDIR/count"
+    make_exiftool_shim "$BATS_TEST_TMPDIR/shim" "$count"
+    run env PATH="$BATS_TEST_TMPDIR/shim:$PATH" "$SYNC" --source "$CARD" --target "$TARGET"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$count")" -le 2 ]
+}

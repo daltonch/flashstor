@@ -55,6 +55,19 @@ require_exiftool() {
     command -v exiftool >/dev/null || skip "exiftool not installed"
 }
 
+# make_exiftool_shim <shim_dir> <count_file>
+# Builds a PATH shim that logs one line per exiftool invocation, then execs
+# the real exiftool.
+make_exiftool_shim() {
+    local shim_dir="$1" count_file="$2"
+    local real
+    real=$(command -v exiftool)
+    mkdir -p "$shim_dir"
+    printf '#!/usr/bin/env bash\necho x >> "%s"\nexec "%s" "$@"\n' \
+        "$count_file" "$real" > "$shim_dir/exiftool"
+    chmod +x "$shim_dir/exiftool"
+}
+
 # Run a snippet in a fresh bash that has sourced sync.sh.
 call() {
     bash -c "source '$SYNC'; $*"

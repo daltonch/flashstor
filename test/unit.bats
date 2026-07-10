@@ -57,32 +57,41 @@ load test_helper
     [ "$status" -eq 4 ]
 }
 
-# --- extract_date -----------------------------------------------------------
+# --- extract_timestamp ------------------------------------------------------
 
-@test "extract_date falls back to file mtime when tool is none" {
-    f="$BATS_TEST_TMPDIR/clip.mp4"
-    printf 'x' > "$f"
-    touch -t 202411020908 "$f"
-    run call extract_date "'$f'" none
-    [ "$output" = "20241102" ]
-}
-
-@test "extract_date with exiftool falls back to mtime without metadata" {
-    require_exiftool
-    f="$BATS_TEST_TMPDIR/clip.mp4"
-    printf 'x' > "$f"
-    touch -t 202411020908 "$f"
-    run call extract_date "'$f'" exiftool
-    [ "$output" = "20241102" ]
-}
-
-@test "extract_date reads exif capture date from jpg" {
+@test "extract_timestamp returns touch format from exif capture date" {
     require_exiftool
     f="$BATS_TEST_TMPDIR/photo.jpg"
     make_jpg_with_date "$f" '2025:01:15 10:30:25'
     touch -t 202506010101 "$f"
-    run call extract_date "'$f'" exiftool
-    [ "$output" = "20250115" ]
+    run call extract_timestamp "'$f'" exiftool
+    [ "$output" = "202501151030.25" ]
+}
+
+@test "extract_timestamp is empty for files without metadata" {
+    require_exiftool
+    f="$BATS_TEST_TMPDIR/clip.mp4"
+    printf 'x' > "$f"
+    touch -t 202411020908 "$f"
+    run call extract_timestamp "'$f'" exiftool
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "extract_timestamp is empty when no metadata tool is available" {
+    f="$BATS_TEST_TMPDIR/clip.mp4"
+    printf 'x' > "$f"
+    run call extract_timestamp "'$f'" none
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "stat_mtime_date reports file mtime as YYYYMMDD" {
+    f="$BATS_TEST_TMPDIR/clip.mp4"
+    printf 'x' > "$f"
+    touch -t 202411020908 "$f"
+    run call stat_mtime_date "'$f'"
+    [ "$output" = "20241102" ]
 }
 
 # --- load_config ------------------------------------------------------------
