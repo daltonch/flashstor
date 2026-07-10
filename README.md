@@ -214,7 +214,7 @@ Files are organized by date with SD card identifiers as subfolders.
 
 ### Duplicate File Handling
 
-The script uses `rsync` with `--ignore-existing` flag, which automatically skips files that already exist in the destination. This is ideal for:
+The script checks the destination before copying and skips any file that already exists there; existing files are never overwritten. This is ideal for:
 - Incremental backups (only new files are copied)
 - Parallel SD card processing (no interactive prompts needed)
 - Safe re-runs (won't overwrite existing files)

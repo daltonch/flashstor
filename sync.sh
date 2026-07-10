@@ -215,8 +215,8 @@ DEPENDENCIES:
 
 DUPLICATE HANDLING:
     Duplicate files (files with the same name) are automatically skipped.
-    The script uses rsync with --ignore-existing to skip files that already exist
-    in the destination. Skipped files are logged and shown in the summary.
+    The script checks the destination before copying and never overwrites an
+    existing file. Skipped files are logged and shown in the summary.
 
 PARALLEL PROCESSING:
     When multiple SD cards are specified with --source, they will be processed
@@ -726,6 +726,8 @@ process_single_source() {
     local file
     for file in "${files[@]}"; do
         current=$((current + 1))
+        local filename
+        filename=$(basename "$file")
 
         verbose "Extracting date for file: $file"
         local timestamp date
@@ -734,7 +736,17 @@ process_single_source() {
             date="${timestamp:0:8}"
         else
             # No capture metadata - organize by file modification time
-            date=$(stat_mtime_date "$file")
+            date=$(stat_mtime_date "$file" || true)
+        fi
+
+        # No usable date means the file is unreadable (vanished mid-run,
+        # card pulled?) - record the error and keep going
+        if ! [[ "$date" =~ ^[0-9]{8}$ ]]; then
+            error "Could not determine date for: $filename"
+            SOURCE_FILES_ERROR["$source_path"]=$((${SOURCE_FILES_ERROR["$source_path"]:-0} + 1))
+            ERROR_FILES_LIST+=("$filename")
+            echo "[$current/$total_files] Processing: $filename - failed"
+            continue
         fi
         verbose "Extracted date: $date"
 
@@ -749,8 +761,6 @@ process_single_source() {
         set -e
 
         # Print the complete message at once (better for parallel processing)
-        local filename
-        filename=$(basename "$file")
         case $result in
             0)
                 # File copied successfully (or would be, in a dry run)

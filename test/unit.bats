@@ -92,6 +92,21 @@ load test_helper
     [ -z "$output" ]
 }
 
+@test "a file that vanishes mid-run is an error, not an abort" {
+    card="$BATS_TEST_TMPDIR/card"
+    target="$BATS_TEST_TMPDIR/t"
+    mkdir -p "$card/DCIM" "$target"
+    printf 'x' > "$card/DCIM/real.mp4"
+    touch -t 202503151030 "$card/DCIM/real.mp4"
+    # ghost.mp4 was seen by the scan but no longer exists at processing time
+    run call "TARGET_PATH='$target'
+        find_media_files() { printf '%s\n' '$card/DCIM/ghost.mp4' '$card/DCIM/real.mp4'; }
+        process_single_source '$card' none"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ghost.mp4 - failed"* ]]
+    [ -f "$target/20250315/card/real.mp4" ]
+}
+
 @test "stat_mtime_date reports file mtime as YYYYMMDD" {
     f="$BATS_TEST_TMPDIR/clip.mp4"
     printf 'x' > "$f"
