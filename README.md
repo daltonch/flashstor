@@ -294,3 +294,19 @@ Since macOS ships with bash 3.2, you need to use the Homebrew-installed bash:
 ```
 
 The script will display an error with installation instructions if you try to run it with bash 3.2.
+
+### Running Tests
+
+The test suite uses [bats-core](https://github.com/bats-core/bats-core):
+
+```bash
+# Install (macOS)
+brew install bats-core
+
+# Run the whole suite
+bats test/
+```
+
+`exiftool` is used by the metadata tests; those tests are skipped automatically
+if it is not installed. Fixture SD cards are generated in a temp directory at
+test time, so no test data is stored in the repo.

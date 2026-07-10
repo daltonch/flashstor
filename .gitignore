@@ -11,8 +11,7 @@ Thumbs.db
 .Spotlight-V100
 .Trashes
 
-# Test directories and files
-test/
+# Test scratch directories (the bats suite in test/ is tracked)
 test_output/
 test_sdcard/
 *.test

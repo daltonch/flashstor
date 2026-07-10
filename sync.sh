@@ -69,6 +69,31 @@ IGNORE_FOLDERS=(.Trashes)
 DUPLICATE_ACTION=""
 APPLY_TO_ALL=false
 
+# Detect stat flavor by capability: PATH may put GNU coreutils first even on
+# macOS, so OS type alone cannot pick the right stat syntax
+STAT_IS_GNU=false
+if stat --version >/dev/null 2>&1; then
+    STAT_IS_GNU=true
+fi
+
+# File size in bytes (empty on failure)
+stat_size_bytes() {
+    if [ "$STAT_IS_GNU" = true ]; then
+        stat -c "%s" "$1" 2>/dev/null
+    else
+        stat -f "%z" "$1" 2>/dev/null
+    fi
+}
+
+# File modification time as YYYYMMDD (empty on failure)
+stat_mtime_date() {
+    if [ "$STAT_IS_GNU" = true ]; then
+        stat -c "%y" "$1" 2>/dev/null | cut -d' ' -f1 | tr -d '-'
+    else
+        stat -f "%Sm" -t "%Y%m%d" "$1" 2>/dev/null
+    fi
+}
+
 # Show help message
 show_help() {
     cat << EOF
@@ -523,8 +548,14 @@ validate_source_uuids() {
 get_sdcard_name() {
     local source_path="$1"
 
-    # If no config file is loaded, use volume name (old behavior)
-    if [ -z "$CONFIG_FILE" ]; then
+    # Volume names are used when no config is loaded or the config defines no
+    # UUID mappings; UUID detection is only needed to consult the mapping
+    local uuid_count=0
+    if [ -n "${UUID_MAP[*]+x}" ]; then
+        uuid_count=${#UUID_MAP[@]}
+    fi
+
+    if [ -z "$CONFIG_FILE" ] || [ "$uuid_count" -eq 0 ]; then
         local sdcard_name=""
 
         # Try to get volume name on macOS
@@ -547,13 +578,11 @@ get_sdcard_name() {
         fi
 
         # Sanitize name (remove special characters)
-        sdcard_name=$(echo "$sdcard_name" | tr -cd '[:alnum:]_-')
-
-        echo "$sdcard_name"
+        echo "$sdcard_name" | tr -cd '[:alnum:]_-'
         return 0
     fi
 
-    # Config file is loaded - use UUID mapping if available
+    # Config with UUID mappings - resolve the name via UUID
     local uuid
     uuid=$(get_volume_uuid "$source_path")
 
@@ -566,56 +595,14 @@ get_sdcard_name() {
     short_uuid=$(get_short_uuid "$uuid")
 
     # Try to match with short UUID first, then full UUID
-    local mapped_name=""
     if [[ -v "UUID_MAP[$short_uuid]" ]]; then
-        mapped_name="${UUID_MAP[$short_uuid]}"
+        echo "${UUID_MAP[$short_uuid]}"
     elif [[ -v "UUID_MAP[$uuid]" ]]; then
-        mapped_name="${UUID_MAP[$uuid]}"
+        echo "${UUID_MAP[$uuid]}"
+    else
+        error "No mapping found for UUID: $uuid (short: $short_uuid)"
+        exit 4
     fi
-
-    # If no mapping found and UUID_MAP is empty, fall back to volume name
-    if [ -z "$mapped_name" ]; then
-        local uuid_count=0
-        if [ -n "${UUID_MAP[*]+x}" ]; then
-            uuid_count=${#UUID_MAP[@]}
-        fi
-
-        if [ "$uuid_count" -eq 0 ]; then
-            # No UUID mappings configured - use volume name
-            local sdcard_name=""
-
-            # Try to get volume name on macOS
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                sdcard_name=$(basename "$source_path")
-            else
-                # On Linux, try to get the volume label
-                if command -v lsblk &> /dev/null; then
-                    local device
-                    device=$(df "$source_path" | tail -1 | awk '{print $1}')
-                    sdcard_name=$(lsblk -no LABEL "$device" 2>/dev/null || basename "$source_path")
-                else
-                    sdcard_name=$(basename "$source_path")
-                fi
-            fi
-
-            # Fallback to basename if empty
-            if [ -z "$sdcard_name" ]; then
-                sdcard_name=$(basename "$source_path")
-            fi
-
-            # Sanitize name (remove special characters)
-            sdcard_name=$(echo "$sdcard_name" | tr -cd '[:alnum:]_-')
-
-            echo "$sdcard_name"
-            return 0
-        else
-            # UUID mappings exist but this UUID is not found
-            error "No mapping found for UUID: $uuid (short: $short_uuid)"
-            exit 4
-        fi
-    fi
-
-    echo "$mapped_name"
 }
 
 # Extract date from file using metadata
@@ -627,19 +614,16 @@ extract_date() {
     case "$tool" in
         exiftool)
             # Try to get CreateDate or MediaCreateDate from exiftool
-            date_str=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}')
+            # `|| true`: a file without date tags must fall through to mtime
+            date_str=$(exiftool -CreateDate -MediaCreateDate -DateTimeOriginal -d "%Y%m%d" "$file" 2>/dev/null | grep -E "Create Date|Media Create Date|Date/Time Original" | head -1 | awk -F': ' '{print $2}' || true)
             ;;
         ffprobe)
             # Try to get creation_time from ffprobe
-            date_str=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_tags=creation_time -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | cut -d'T' -f1 | tr -d '-')
+            date_str=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_tags=creation_time -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | cut -d'T' -f1 | tr -d '-' || true)
             ;;
         none)
             # Use file modification time
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                date_str=$(stat -f "%Sm" -t "%Y%m%d" "$file")
-            else
-                date_str=$(stat -c "%y" "$file" | cut -d' ' -f1 | tr -d '-')
-            fi
+            date_str=$(stat_mtime_date "$file" || true)
             ;;
     esac
 
@@ -648,12 +632,7 @@ extract_date() {
         echo "$date_str"
     else
         # Fallback to file modification time
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            date_str=$(stat -f "%Sm" -t "%Y%m%d" "$file")
-        else
-            date_str=$(stat -c "%y" "$file" | cut -d' ' -f1 | tr -d '-')
-        fi
-        echo "$date_str"
+        stat_mtime_date "$file"
     fi
 }
 
@@ -693,11 +672,7 @@ get_file_size() {
     local file="$1"
     local size_bytes
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        size_bytes=$(stat -f "%z" "$file" 2>/dev/null)
-    else
-        size_bytes=$(stat -c "%s" "$file" 2>/dev/null)
-    fi
+    size_bytes=$(stat_size_bytes "$file")
 
     # Check if we got a valid size
     if [ -z "$size_bytes" ] || ! [[ "$size_bytes" =~ ^[0-9]+$ ]]; then
@@ -738,11 +713,8 @@ rsync_file() {
     # Get file size for statistics
     file_size=$(get_file_size "$source_file")
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        bytes_copied=$(stat -f "%z" "$source_file" 2>/dev/null)
-    else
-        bytes_copied=$(stat -c "%s" "$source_file" 2>/dev/null)
-    fi
+    bytes_copied=$(stat_size_bytes "$source_file")
+    bytes_copied=${bytes_copied:-0}
 
     # Copy the file
     if [ "$DRY_RUN" = true ]; then
@@ -1328,5 +1300,7 @@ main() {
     exit 0
 }
 
-# Run main function
-main "$@"
+# Run main only when executed directly (allows sourcing the functions in tests)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
