@@ -295,6 +295,20 @@ Since macOS ships with bash 3.2, you need to use the Homebrew-installed bash:
 
 The script will display an error with installation instructions if you try to run it with bash 3.2.
 
+### Shell Completions (fish)
+
+Tab completions for all `sync.sh` flags are provided in `sync.fish`. To install:
+
+```fish
+cp sync.fish ~/.config/fish/completions/sync.fish
+```
+
+Or source it from your fish config:
+
+```fish
+source /path/to/flashstor/sync.fish
+```
+
 ### Running Tests
 
 The test suite uses [bats-core](https://github.com/bats-core/bats-core):
