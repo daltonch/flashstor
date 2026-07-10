@@ -1073,19 +1073,15 @@ format_time() {
     fi
 }
 
-# Format bytes to human-readable format
+# Format bytes to human-readable format (one decimal above the byte range)
 format_bytes() {
-    local bytes=$1
-    local -a units=("B" "KB" "MB" "GB" "TB")
-    local unit=0
-    local size=$bytes
-
-    while [ $size -ge 1024 ] && [ $unit -lt 4 ]; do
-        size=$((size / 1024))
-        unit=$((unit + 1))
-    done
-
-    printf "%d %s" $size "${units[$unit]}"
+    awk -v b="$1" 'BEGIN {
+        split("B KB MB GB TB", units, " ")
+        i = 1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        if (i == 1) printf "%d %s", b, units[i]
+        else printf "%.1f %s", b, units[i]
+    }'
 }
 
 # Print summary

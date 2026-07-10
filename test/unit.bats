@@ -18,6 +18,16 @@ load test_helper
     [ "$output" = "512 B" ]
 }
 
+@test "format_bytes reports one decimal for kilobytes" {
+    run call format_bytes 1536
+    [ "$output" = "1.5 KB" ]
+}
+
+@test "format_bytes reports one decimal for large sizes" {
+    run call format_bytes 5000000000
+    [ "$output" = "4.7 GB" ]
+}
+
 @test "format_time formats hours minutes seconds" {
     run call format_time 3725
     [ "$output" = "1h 2m 5s" ]
